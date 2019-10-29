@@ -34,34 +34,21 @@ import (
 )
 
 const (
-	CGO_ENABLED        = "CGO_ENABLED"
-	config             = "config"
-	dotgauge           = ".gauge"
-	GOARCH             = "GOARCH"
-	GOOS               = "GOOS"
-	GAUGE_ROOT         = "GAUGE_ROOT"
-	home               = "HOME"
-	X86                = "386"
-	X86_64             = "amd64"
-	darwin             = "darwin"
-	linux              = "linux"
-	windows            = "windows"
-	bin                = "bin"
-	gauge              = "gauge"
-	gaugeScreenshot    = "gauge_screenshot"
-	deploy             = "deploy"
-	installShellScript = "install.sh"
-	CC                 = "CC"
-	pkg                = ".pkg"
-	packagesBuild      = "packagesbuild"
-	nightlyDatelayout  = "2006-01-02"
+	CGO_ENABLED       = "CGO_ENABLED"
+	GOARCH            = "GOARCH"
+	GOOS              = "GOOS"
+	X86               = "386"
+	X86_64            = "amd64"
+	darwin            = "darwin"
+	linux             = "linux"
+	freebsd           = "freebsd"
+	windows           = "windows"
+	bin               = "bin"
+	gauge             = "gauge"
+	deploy            = "deploy"
+	CC                = "CC"
+	nightlyDatelayout = "2006-01-02"
 )
-
-var gaugeConfigDir string
-
-var darwinPackageProject = filepath.Join("build", "install", "macosx", "gauge-pkg.pkgproj")
-
-var gaugeScreenshotLocation = filepath.Join("github.com", "getgauge", "gauge_screenshot")
 
 var deployDir = filepath.Join(deploy, gauge)
 
@@ -69,7 +56,9 @@ func runProcess(command string, arg ...string) {
 	cmd := exec.Command(command, arg...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	log.Printf("Execute %v\n", cmd.Args)
+	if *verbose {
+		log.Printf("Execute %v\n", cmd.Args)
+	}
 	err := cmd.Run()
 	if err != nil {
 		panic(err)
@@ -82,18 +71,8 @@ func runCommand(command string, arg ...string) (string, error) {
 	return strings.TrimSpace(fmt.Sprintf("%s", bytes)), err
 }
 
-func signExecutable(exeFilePath string, certFilePath string, certFilePwd string) {
-	if getGOOS() == windows {
-		if certFilePath != "" && certFilePwd != "" {
-			log.Printf("Signing: %s", exeFilePath)
-			runProcess("signtool", "sign", "/f", certFilePath, "/p", certFilePwd, exeFilePath)
-		} else {
-			log.Printf("No certificate file passed. Executable won't be signed.")
-		}
-	}
-}
-
 var buildMetadata string
+var commitHash string
 
 func getBuildVersion() string {
 	if buildMetadata != "" {
@@ -104,34 +83,29 @@ func getBuildVersion() string {
 
 func compileGauge() {
 	executablePath := getGaugeExecutablePath(gauge)
+	ldflags := fmt.Sprintf("-X github.com/getgauge/gauge/version.BuildMetadata=%s -X github.com/getgauge/gauge/version.CommitHash=%s", buildMetadata, commitHash)
 	args := []string{
 		"build",
+		"-mod=vendor",
 		fmt.Sprintf("-gcflags=-trimpath=%s", os.Getenv("GOPATH")),
 		fmt.Sprintf("-asmflags=-trimpath=%s", os.Getenv("GOPATH")),
-		"-ldflags", "-X github.com/getgauge/gauge/version.BuildMetadata=" + buildMetadata, "-o", executablePath,
+		"-ldflags", ldflags, "-o", executablePath,
 	}
 	runProcess("go", args...)
-	compileGaugeScreenshot()
-}
-
-func compileGaugeScreenshot() {
-	getGaugeScreenshot()
-	executablePath := getGaugeExecutablePath(gaugeScreenshot)
-	runProcess("go", "build", "-o", executablePath, gaugeScreenshotLocation)
-}
-
-func getGaugeScreenshot() {
-	runProcess("go", "get", "-u", "-d", gaugeScreenshotLocation)
 }
 
 func runTests(coverage bool) {
 	if coverage {
-		runProcess("go", "test", "-covermode=count", "-coverprofile=count.out")
+		runProcess("go", "test", "-mod=vendor", "-covermode=count", "-coverprofile=count.out")
 		if coverage {
-			runProcess("go", "tool", "cover", "-html=count.out")
+			runProcess("go", "tool", "cover", "-html=count.out", "-mod=vendor")
 		}
 	} else {
-		runProcess("go", "test", "./...", "-v")
+		if *verbose {
+			runProcess("go", "test", "-mod=vendor", "./...", "-v")
+		} else {
+			runProcess("go", "test", "-mod=vendor", "./...")
+		}
 	}
 }
 
@@ -140,7 +114,9 @@ func installFiles(files map[string]string, installDir string) {
 	for src, dst := range files {
 		base := filepath.Base(src)
 		installDst := filepath.Join(installDir, dst)
-		log.Printf("Install %s -> %s\n", src, installDst)
+		if *verbose {
+			log.Printf("Install %s -> %s\n", src, installDst)
+		}
 		stat, err := os.Stat(src)
 		if err != nil {
 			panic(err)
@@ -156,33 +132,10 @@ func installFiles(files map[string]string, installDir string) {
 	}
 }
 
-func copyGaugeConfigFiles(installPath string) {
-	files := make(map[string]string)
-	files[filepath.Join("skel", "example.spec")] = filepath.Join(config, "skel")
-	files[filepath.Join("skel", "default.properties")] = filepath.Join(config, "skel", "env")
-	files[filepath.Join("skel", ".gitignore")] = filepath.Join(config, "skel")
-	files[filepath.Join("skel", "gauge.properties")] = config
-	files[filepath.Join("notice.md")] = config
-	files = addInstallScripts(files)
-	installFiles(files, installPath)
-}
-
 func copyGaugeBinaries(installPath string) {
 	files := make(map[string]string)
-	files[getGaugeExecutablePath(gauge)] = bin
-	files[getGaugeExecutablePath(gaugeScreenshot)] = bin
+	files[getGaugeExecutablePath(gauge)] = ""
 	installFiles(files, installPath)
-}
-
-func addInstallScripts(files map[string]string) map[string]string {
-	if (getGOOS() == darwin || getGOOS() == linux) && (*distro) {
-		files[filepath.Join("build", "install", installShellScript)] = ""
-	} else if getGOOS() == windows {
-		files[filepath.Join("build", "install", "windows", "plugin-install.bat")] = ""
-		files[filepath.Join("build", "install", "windows", "backup_properties_file.bat")] = ""
-		files[filepath.Join("build", "install", "windows", "set_timestamp.bat")] = ""
-	}
-	return files
 }
 
 func setEnv(envVariables map[string]string) {
@@ -200,9 +153,9 @@ var allPlatforms = flag.Bool("all-platforms", false, "Compiles for all platforms
 var targetLinux = flag.Bool("target-linux", false, "Compiles for linux only, both x86 and x86_64")
 var binDir = flag.String("bin-dir", "", "Specifies OS_PLATFORM specific binaries to install when cross compiling")
 var distro = flag.Bool("distro", false, "Create gauge distributable")
+var verbose = flag.Bool("verbose", false, "Print verbose details")
 var skipWindowsDistro = flag.Bool("skip-windows", false, "Skips creation of windows distributable on unix machines while cross platform compilation")
-var certFile = flag.String("certFile", "", "Should be passed for signing the windows installer along with the password (certFilePwd)")
-var certFilePwd = flag.String("certFilePwd", "", "Password for certificate that will be used to sign the windows installer")
+var certFile = flag.String("certFile", "", "Should be passed for signing the windows installer")
 
 // Defines all the compile targets
 // Each target name is the directory name
@@ -212,27 +165,23 @@ var (
 		map[string]string{GOARCH: X86_64, GOOS: darwin, CGO_ENABLED: "0"},
 		map[string]string{GOARCH: X86, GOOS: linux, CGO_ENABLED: "0"},
 		map[string]string{GOARCH: X86_64, GOOS: linux, CGO_ENABLED: "0"},
+		map[string]string{GOARCH: X86, GOOS: freebsd, CGO_ENABLED: "0"},
+		map[string]string{GOARCH: X86_64, GOOS: freebsd, CGO_ENABLED: "0"},
 		map[string]string{GOARCH: X86, GOOS: windows, CC: "i586-mingw32-gcc", CGO_ENABLED: "1"},
 		map[string]string{GOARCH: X86_64, GOOS: windows, CC: "x86_64-w64-mingw32-gcc", CGO_ENABLED: "1"},
 	}
-	osDistroMap = map[string]distroFunc{windows: createWindowsDistro, linux: createLinuxPackage, darwin: createDarwinPackage}
+	osDistroMap = map[string]distroFunc{windows: createWindowsDistro, linux: createLinuxPackage, freebsd: createLinuxPackage, darwin: createDarwinPackage}
 )
 
 func main() {
 	flag.Parse()
+	commitHash = revParseHead()
 	if *nightly {
 		buildMetadata = fmt.Sprintf("nightly-%s", time.Now().Format(nightlyDatelayout))
 	}
-	// disabled this temporarily.
-	// dependency on external package breaks vendoring, since make.go is in a different package, i.e. not in gauge
-	// os.Stdin.Stat is the way to go, but it doesnt work on windows. Fix tentatively in go1.9
-	// ref: https://github.com/golang/go/issues/14853
-
-	// else if isatty.IsTerminal(os.Stdout.Fd()) {
-	//      buildMetadata = fmt.Sprintf("%s%s", buildMetadata, revParseHead())
-	// }
-	fmt.Println("Build: " + buildMetadata)
-	runProcess("go", "generate", "./...")
+	if *verbose {
+		fmt.Println("Build: " + buildMetadata)
+	}
 	if *test {
 		runTests(*coverage)
 	} else if *install {
@@ -249,6 +198,9 @@ func main() {
 }
 
 func revParseHead() string {
+	if _, err := os.Stat(".git"); err != nil {
+		return ""
+	}
 	cmd := exec.Command("git", "rev-parse", "--short", "HEAD")
 	var hash bytes.Buffer
 	cmd.Stdout = &hash
@@ -256,14 +208,7 @@ func revParseHead() string {
 	if err != nil {
 		log.Fatal(err)
 	}
-	cmd = exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	var branch bytes.Buffer
-	cmd.Stdout = &branch
-	err = cmd.Run()
-	if err != nil {
-		log.Fatal(err)
-	}
-	return fmt.Sprintf("%s-%s", strings.TrimSpace(hash.String()), strings.TrimSpace(branch.String()))
+	return strings.TrimSpace(hash.String())
 }
 
 func filteredPlatforms() []map[string]string {
@@ -283,7 +228,9 @@ func filteredPlatforms() []map[string]string {
 func crossCompileGauge() {
 	for _, platformEnv := range filteredPlatforms() {
 		setEnv(platformEnv)
-		log.Printf("Compiling for platform => OS:%s ARCH:%s \n", platformEnv[GOOS], platformEnv[GOARCH])
+		if *verbose {
+			log.Printf("Compiling for platform => OS:%s ARCH:%s \n", platformEnv[GOOS], platformEnv[GOARCH])
+		}
 		compileGauge()
 	}
 }
@@ -291,13 +238,8 @@ func crossCompileGauge() {
 func installGauge() {
 	updateGaugeInstallPrefix()
 	copyGaugeBinaries(deployDir)
-	if _, err := common.MirrorDir(filepath.Join(deployDir, bin), filepath.Join(*gaugeInstallPrefix, bin)); err != nil {
+	if _, err := common.MirrorDir(filepath.Join(deployDir), filepath.Join(*gaugeInstallPrefix, bin)); err != nil {
 		panic(fmt.Sprintf("Could not install gauge : %s", err))
-	}
-	updateConfigDir()
-	copyGaugeConfigFiles(deployDir)
-	if _, err := common.MirrorDir(filepath.Join(deployDir, config), gaugeConfigDir); err != nil {
-		panic(fmt.Sprintf("Could not copy gauge configuration files: %s", err))
 	}
 }
 
@@ -305,7 +247,9 @@ func createGaugeDistributables(forAllPlatforms bool) {
 	if forAllPlatforms {
 		for _, platformEnv := range filteredPlatforms() {
 			setEnv(platformEnv)
-			log.Printf("Creating distro for platform => OS:%s ARCH:%s \n", platformEnv[GOOS], platformEnv[GOARCH])
+			if *verbose {
+				log.Printf("Creating distro for platform => OS:%s ARCH:%s \n", platformEnv[GOOS], platformEnv[GOARCH])
+			}
 			createDistro()
 		}
 	} else {
@@ -333,7 +277,6 @@ func createWindowsInstaller() {
 		panic(err)
 	}
 	copyGaugeBinaries(distroDir)
-	copyGaugeConfigFiles(distroDir)
 	runProcess("makensis.exe",
 		fmt.Sprintf("/DPRODUCT_VERSION=%s", getBuildVersion()),
 		fmt.Sprintf("/DGAUGE_DISTRIBUTABLES_DIR=%s", distroDir),
@@ -341,23 +284,35 @@ func createWindowsInstaller() {
 		filepath.Join("build", "install", "windows", "gauge-install.nsi"))
 	createZipFromUtil(deploy, pName, pName)
 	os.RemoveAll(distroDir)
-	signExecutable(installerFileName+".exe", *certFile, *certFilePwd)
+	signExecutable(installerFileName+".exe", *certFile)
+}
+
+func signExecutable(exeFilePath string, certFilePath string) {
+	if getGOOS() == windows {
+		if certFilePath != "" {
+			log.Printf("Signing: %s", exeFilePath)
+			runProcess("signtool", "sign", "/f", certFilePath, "/debug", "/v", "/tr", "http://timestamp.digicert.com", "/a", "/fd", "sha256", "/td", "sha256", "/as", exeFilePath)
+		} else {
+			log.Printf("No certificate file passed. Executable won't be signed.")
+		}
+	}
 }
 
 func createDarwinPackage() {
 	distroDir := filepath.Join(deploy, gauge)
 	copyGaugeBinaries(distroDir)
-	copyGaugeConfigFiles(distroDir)
+	if id := os.Getenv("OS_SIGNING_IDENTITY"); id == "" {
+		log.Printf("No singning identity found . Executable won't be signed.")
+	} else {
+		runProcess("codesign", "-s", id, "--force", "--deep", filepath.Join(distroDir, gauge))
+	}
 	createZipFromUtil(deploy, gauge, packageName())
-	runProcess(packagesBuild, "-v", darwinPackageProject)
-	runProcess("mv", filepath.Join(deploy, gauge+pkg), filepath.Join(deploy, fmt.Sprintf("%s-%s-%s.%s%s", gauge, getBuildVersion(), getGOOS(), getPackageArchSuffix(), pkg)))
 	os.RemoveAll(distroDir)
 }
 
 func createLinuxPackage() {
 	distroDir := filepath.Join(deploy, packageName())
 	copyGaugeBinaries(distroDir)
-	copyGaugeConfigFiles(distroDir)
 	createZipFromUtil(deploy, packageName(), packageName())
 	os.RemoveAll(distroDir)
 }
@@ -374,9 +329,6 @@ func removeUnwatedFiles(dir, currentOS string) error {
 	}
 	if currentOS == "windows" {
 		fileList = append(fileList, []string{
-			"backup_properties_file.bat",
-			"plugin-install.bat",
-			"set_timestamp.bat",
 			"desktop.ini",
 			"Thumbs.db",
 		}...)
@@ -421,24 +373,15 @@ func createZipFromUtil(dir, zipDir, pkgName string) {
 		zipargs = []string{"-noprofile", "-executionpolicy", "bypass", "-file", windowsZipScript, filepath.Join(absdir, zipDir), filepath.Join(absdir, pkgName+".zip")}
 	}
 	output, err := runCommand(zipcmd, zipargs...)
-	fmt.Println(output)
+	if *verbose {
+		fmt.Println(output)
+	}
 	if err != nil {
 		panic(fmt.Sprintf("Failed to zip: %s", err))
 	}
-	os.Chdir(wd)
-}
-
-func updateConfigDir() {
-	if os.Getenv(GAUGE_ROOT) != "" {
-		gaugeConfigDir = os.Getenv(GAUGE_ROOT)
-	} else {
-		if runtime.GOOS == "windows" {
-			appdata := os.Getenv("APPDATA")
-			gaugeConfigDir = filepath.Join(appdata, gauge, config)
-		} else {
-			home := os.Getenv("HOME")
-			gaugeConfigDir = filepath.Join(home, dotgauge, config)
-		}
+	err = os.Chdir(wd)
+	if err != nil {
+		panic(fmt.Sprintf("Unable to set working directory to %s: %s", wd, err.Error()))
 	}
 }
 

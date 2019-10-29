@@ -89,21 +89,24 @@ func TestAllowUpdates(t *testing.T) {
 
 func TestReadUniqueID(t *testing.T) {
 	expected := "foo"
-	idFile := filepath.Join("_testData", "id")
-	ioutil.WriteFile(idFile, []byte(expected), common.NewFilePermissions)
+	idFile := filepath.Join("_testData", "config", "id")
+	err := ioutil.WriteFile(idFile, []byte(expected), common.NewFilePermissions)
+	if err != nil {
+		t.Error(err)
+	}
 
 	s, err := filepath.Abs("_testData")
 	if err != nil {
 		t.Error(err)
 	}
 
-	os.Setenv("GAUGE_ROOT", s)
+	os.Setenv("GAUGE_HOME", s)
 	got := UniqueID()
 
 	if got != expected {
 		t.Errorf("Expected UniqueID=%s, got %s", expected, got)
 	}
-	os.Setenv("GAUGE_ROOT", "")
+	os.Setenv("GAUGE_HOME", "")
 	err = os.Remove(idFile)
 	if err != nil {
 		t.Error(err)

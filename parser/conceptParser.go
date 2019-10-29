@@ -27,12 +27,14 @@ import (
 	"github.com/getgauge/gauge/util"
 )
 
+// ConceptParser is used for parsing concepts. Similar, but not the same as a SpecParser
 type ConceptParser struct {
 	currentState   int
 	currentConcept *gauge.Step
 }
 
-//concept file can have multiple concept headings
+// Parse Generates token for the given concept file and cretes concepts(array of steps) and parse results.
+// concept file can have multiple concept headings.
 func (parser *ConceptParser) Parse(text, fileName string) ([]*gauge.Step, *ParseResult) {
 	defer parser.resetState()
 
@@ -42,6 +44,7 @@ func (parser *ConceptParser) Parse(text, fileName string) ([]*gauge.Step, *Parse
 	return concepts, &ParseResult{ParseErrors: append(errs, res.ParseErrors...), Warnings: res.Warnings}
 }
 
+// ParseFile Reads file contents from a give file and parses the file.
 func (parser *ConceptParser) ParseFile(file string) ([]*gauge.Step, *ParseResult) {
 	fileText, fileReadErr := common.ReadFileContents(file)
 	if fileReadErr != nil {
@@ -64,6 +67,10 @@ func (parser *ConceptParser) createConcepts(tokens []*Token, fileName string) ([
 	for _, token := range tokens {
 		if parser.isConceptHeading(token) {
 			if isInState(parser.currentState, conceptScope, stepScope) {
+				if len(parser.currentConcept.ConceptSteps) < 1 {
+					parseRes.ParseErrors = append(parseRes.ParseErrors, ParseError{FileName: fileName, LineNo: parser.currentConcept.LineNo, Message: "Concept should have atleast one step", LineText: parser.currentConcept.LineText})
+					continue
+				}
 				concepts = append(concepts, parser.currentConcept)
 			}
 			var res *ParseResult
@@ -85,7 +92,6 @@ func (parser *ConceptParser) createConcepts(tokens []*Token, fileName string) ([
 			}
 			if errs := parser.processConceptStep(token, fileName); len(errs) > 0 {
 				parseRes.ParseErrors = append(parseRes.ParseErrors, errs...)
-				continue
 			}
 			addStates(&parser.currentState, stepScope)
 		} else if parser.isTableHeader(token) {
@@ -170,12 +176,12 @@ func (parser *ConceptParser) processConceptHeading(token *Token, fileName string
 func (parser *ConceptParser) processConceptStep(token *Token, fileName string) []ParseError {
 	processStep(new(SpecParser), token)
 	conceptStep, parseRes := CreateStepUsingLookup(token, &parser.currentConcept.Lookup, fileName)
-	if parseRes != nil && len(parseRes.ParseErrors) > 0 {
-		return parseRes.ParseErrors
+	if conceptStep != nil {
+		conceptStep.Suffix = token.Suffix
+		parser.currentConcept.ConceptSteps = append(parser.currentConcept.ConceptSteps, conceptStep)
+		parser.currentConcept.Items = append(parser.currentConcept.Items, conceptStep)
 	}
-	parser.currentConcept.ConceptSteps = append(parser.currentConcept.ConceptSteps, conceptStep)
-	parser.currentConcept.Items = append(parser.currentConcept.Items, conceptStep)
-	return nil
+	return parseRes.ParseErrors
 }
 
 func (parser *ConceptParser) processTableHeader(token *Token) {
@@ -209,8 +215,9 @@ func (parser *ConceptParser) createConceptLookup(concept *gauge.Step) {
 	}
 }
 
-func CreateConceptsDictionary() (*gauge.ConceptDictionary, *ParseResult) {
-	cptFilesMap := make(map[string]bool, 0)
+// CreateConceptsDictionary generates a ConceptDictionary which is map of concept text to concept. ConceptDictionary is used to search for a concept.
+func CreateConceptsDictionary() (*gauge.ConceptDictionary, *ParseResult, error) {
+	cptFilesMap := make(map[string]bool)
 	for _, cpt := range util.GetConceptFiles() {
 		cptFilesMap[cpt] = true
 	}
@@ -220,69 +227,143 @@ func CreateConceptsDictionary() (*gauge.ConceptDictionary, *ParseResult) {
 	}
 	conceptsDictionary := gauge.NewConceptDictionary()
 	res := &ParseResult{Ok: true}
-	for _, conceptFile := range conceptFiles {
-		if _, errs := AddConcepts(conceptFile, conceptsDictionary); len(errs) > 0 {
-			for _, err := range errs {
-				logger.APILog.Error("Concept parse failure: %s %s", conceptFile, err)
-			}
-			res.ParseErrors = append(res.ParseErrors, errs...)
-			res.Ok = false
+	if _, errs, e := AddConcepts(conceptFiles, conceptsDictionary); len(errs) > 0 {
+		if e != nil {
+			return nil, nil, e
 		}
-	}
-	vRes := validateConcepts(conceptsDictionary)
-	if len(vRes.CriticalErrors) > 0 {
+		for _, err := range errs {
+			logger.Errorf(false, "Concept parse failure: %s %s", conceptFiles[0], err)
+		}
+		res.ParseErrors = append(res.ParseErrors, errs...)
 		res.Ok = false
-		res.CriticalErrors = append(res.CriticalErrors, vRes.CriticalErrors...)
 	}
-	return conceptsDictionary, res
+	vRes := ValidateConcepts(conceptsDictionary)
+	if len(vRes.ParseErrors) > 0 {
+		res.Ok = false
+		res.ParseErrors = append(res.ParseErrors, vRes.ParseErrors...)
+	}
+	return conceptsDictionary, res, nil
 }
 
-func AddConcepts(conceptFile string, conceptDictionary *gauge.ConceptDictionary) ([]*gauge.Step, []ParseError) {
-	concepts, parseRes := new(ConceptParser).ParseFile(conceptFile)
-	if parseRes != nil && parseRes.Warnings != nil {
-		for _, warning := range parseRes.Warnings {
-			logger.Warning(warning.String())
-		}
-	}
+// AddConcept adds the concept in the ConceptDictionary.
+func AddConcept(concepts []*gauge.Step, file string, conceptDictionary *gauge.ConceptDictionary) ([]ParseError, error) {
+	parseErrors := make([]ParseError, 0)
 	for _, conceptStep := range concepts {
-		if _, exists := conceptDictionary.ConceptsMap[conceptStep.Value]; exists {
-			parseRes.ParseErrors = append(parseRes.ParseErrors, ParseError{FileName: conceptFile, LineNo: conceptStep.LineNo, Message: "Duplicate concept definition found", LineText: conceptStep.LineText})
+		if dupConcept, exists := conceptDictionary.ConceptsMap[conceptStep.Value]; exists {
+			parseErrors = append(parseErrors, ParseError{
+				FileName: file,
+				LineNo:   conceptStep.LineNo,
+				Message:  "Duplicate concept definition found",
+				LineText: conceptStep.LineText,
+			})
+			parseErrors = append(parseErrors, ParseError{
+				FileName: dupConcept.FileName,
+				LineNo:   dupConcept.ConceptStep.LineNo,
+				Message:  "Duplicate concept definition found",
+				LineText: dupConcept.ConceptStep.LineText,
+			})
 		}
-		conceptDictionary.ConceptsMap[conceptStep.Value] = &gauge.Concept{conceptStep, conceptFile}
-		conceptDictionary.ReplaceNestedConceptSteps(conceptStep)
+		conceptDictionary.ConceptsMap[conceptStep.Value] = &gauge.Concept{ConceptStep: conceptStep, FileName: file}
+		if err := conceptDictionary.ReplaceNestedConceptSteps(conceptStep); err != nil {
+			return nil, err
+		}
 	}
-	conceptDictionary.UpdateLookupForNestedConcepts()
-	return concepts, parseRes.ParseErrors
+	err := conceptDictionary.UpdateLookupForNestedConcepts()
+	return parseErrors, err
 }
 
-func validateConcepts(conceptDictionary *gauge.ConceptDictionary) *ParseResult {
-	for _, concept := range conceptDictionary.ConceptsMap {
-		err := checkCircularReferencing(conceptDictionary, concept.ConceptStep, nil)
+// AddConcepts parses the given concept file and adds each concept to the concept dictionary.
+func AddConcepts(conceptFiles []string, conceptDictionary *gauge.ConceptDictionary) ([]*gauge.Step, []ParseError, error) {
+	var conceptSteps []*gauge.Step
+	var parseResults []*ParseResult
+	for _, conceptFile := range conceptFiles {
+		concepts, parseRes := new(ConceptParser).ParseFile(conceptFile)
+		if parseRes != nil && parseRes.Warnings != nil {
+			for _, warning := range parseRes.Warnings {
+				logger.Warningf(true, warning.String())
+			}
+		}
+		parseErrors, err := AddConcept(concepts, conceptFile, conceptDictionary)
 		if err != nil {
-			return &ParseResult{CriticalErrors: []ParseError{err.(ParseError)}, FileName: concept.FileName}
+			return nil, nil, err
 		}
+		parseRes.ParseErrors = append(parseRes.ParseErrors, parseErrors...)
+		conceptSteps = append(conceptSteps, concepts...)
+		parseResults = append(parseResults, parseRes)
 	}
-	return &ParseResult{ParseErrors: []ParseError{}}
+	errs := collectAllParseErrors(parseResults)
+	return conceptSteps, errs, nil
 }
 
-func checkCircularReferencing(conceptDictionary *gauge.ConceptDictionary, concept *gauge.Step, traversedSteps map[string]string) error {
-	if traversedSteps == nil {
-		traversedSteps = make(map[string]string, 0)
+func collectAllParseErrors(results []*ParseResult) (errs []ParseError) {
+	for _, res := range results {
+		errs = append(errs, res.ParseErrors...)
 	}
-	currentConceptFileName := conceptDictionary.Search(concept.Value).FileName
+	return
+}
+
+// ValidateConcepts ensures that there are no circular references within
+func ValidateConcepts(conceptDictionary *gauge.ConceptDictionary) *ParseResult {
+	res := &ParseResult{ParseErrors: []ParseError{}}
+	var conceptsWithError []*gauge.Concept
+	for _, concept := range conceptDictionary.ConceptsMap {
+		errs := checkCircularReferencing(conceptDictionary, concept.ConceptStep, nil)
+		if errs != nil {
+			delete(conceptDictionary.ConceptsMap, concept.ConceptStep.Value)
+			res.ParseErrors = append(res.ParseErrors, errs...)
+			conceptsWithError = append(conceptsWithError, concept)
+		}
+	}
+	for _, con := range conceptsWithError {
+		removeAllReferences(conceptDictionary, con)
+	}
+	return res
+}
+
+func removeAllReferences(conceptDictionary *gauge.ConceptDictionary, concept *gauge.Concept) {
+	for _, cpt := range conceptDictionary.ConceptsMap {
+		var nestedSteps []*gauge.Step
+		for _, con := range cpt.ConceptStep.ConceptSteps {
+			if con.Value != concept.ConceptStep.Value {
+				nestedSteps = append(nestedSteps, con)
+			}
+		}
+		cpt.ConceptStep.ConceptSteps = nestedSteps
+	}
+}
+
+func checkCircularReferencing(conceptDictionary *gauge.ConceptDictionary, concept *gauge.Step, traversedSteps map[string]string) []ParseError {
+	if traversedSteps == nil {
+		traversedSteps = make(map[string]string)
+	}
+	con := conceptDictionary.Search(concept.Value)
+	if con == nil {
+		return nil
+	}
+	currentConceptFileName := con.FileName
 	traversedSteps[concept.Value] = currentConceptFileName
 	for _, step := range concept.ConceptSteps {
-		if fileName, exists := traversedSteps[step.Value]; exists {
-			return ParseError{
-				FileName: fileName,
-				LineText: step.LineText,
-				LineNo:   concept.LineNo,
-				Message:  fmt.Sprintf("Circular reference found in concept. \"%s\" => %s:%d", concept.LineText, fileName, step.LineNo),
+		if _, exists := traversedSteps[step.Value]; exists {
+			conceptDictionary.Remove(concept.Value)
+			return []ParseError{
+				{
+					FileName: step.FileName,
+					LineText: step.LineText,
+					LineNo:   step.LineNo,
+					Message:  fmt.Sprintf("Circular reference found in concept. \"%s\" => %s:%d", concept.LineText, concept.FileName, concept.LineNo),
+				},
+				{
+					FileName: concept.FileName,
+					LineText: concept.LineText,
+					LineNo:   concept.LineNo,
+					Message:  fmt.Sprintf("Circular reference found in concept. \"%s\" => %s:%d", step.LineText, step.FileName, step.LineNo),
+				},
 			}
 		}
 		if step.IsConcept {
-			if err := checkCircularReferencing(conceptDictionary, step, traversedSteps); err != nil {
-				return err
+			if errs := checkCircularReferencing(conceptDictionary, step, traversedSteps); errs != nil {
+				conceptDictionary.Remove(concept.Value)
+				return errs
 			}
 		}
 	}

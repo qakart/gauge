@@ -17,15 +17,22 @@
 
 package gauge
 
+import (
+	"strings"
+)
+
 type Scenario struct {
-	Heading           *Heading
-	Steps             []*Step
-	Comments          []*Comment
-	Tags              *Tags
-	Items             []Item
-	DataTableRow      Table
-	DataTableRowIndex int
-	Span              *Span
+	Heading                   *Heading
+	Steps                     []*Step
+	Comments                  []*Comment
+	Tags                      *Tags
+	Items                     []Item
+	DataTable                 DataTable
+	SpecDataTableRow          Table
+	SpecDataTableRowIndex     int
+	ScenarioDataTableRow      Table
+	ScenarioDataTableRowIndex int
+	Span                      *Span
 }
 
 // Span represents scope of Scenario based on line number
@@ -57,7 +64,7 @@ func (scenario *Scenario) NTags() int {
 	if scenario.Tags == nil {
 		return 0
 	}
-	return len(scenario.Tags.Values)
+	return len(scenario.Tags.Values())
 }
 
 func (scenario *Scenario) AddComment(comment *Comment) {
@@ -65,17 +72,29 @@ func (scenario *Scenario) AddComment(comment *Comment) {
 	scenario.AddItem(comment)
 }
 
+func (scenario *Scenario) AddDataTable(table *Table) {
+	scenario.DataTable.Table = *table
+	scenario.AddItem(&scenario.DataTable)
+}
+
 func (scenario *Scenario) InSpan(lineNumber int) bool {
 	return scenario.Span.isInRange(lineNumber)
 }
 
-func (scenario *Scenario) renameSteps(oldStep Step, newStep Step, orderMap map[int]int) bool {
+func (scenario *Scenario) renameSteps(oldStep Step, newStep Step, orderMap map[int]int) ([]*StepDiff, bool) {
 	isRefactored := false
+	diffs := []*StepDiff{}
 	isConcept := false
 	for _, step := range scenario.Steps {
-		isRefactored = step.Rename(oldStep, newStep, isRefactored, orderMap, &isConcept)
+		diff, refactor := step.Rename(oldStep, newStep, isRefactored, orderMap, &isConcept)
+		if diff != nil {
+			diffs = append(diffs, diff)
+		}
+		if refactor {
+			isRefactored = refactor
+		}
 	}
-	return isRefactored
+	return diffs, isRefactored
 }
 
 func (scenario *Scenario) AddItem(itemToAdd Item) {
@@ -89,24 +108,19 @@ func (scenario *Scenario) LatestStep() *Step {
 	return scenario.Steps[len(scenario.Steps)-1]
 }
 
-func (scenario *Scenario) Traverse(traverser ScenarioTraverser) {
-	traverser.ScenarioHeading(scenario.Heading)
-	for _, item := range scenario.Items {
-		switch item.Kind() {
-		case StepKind:
-			traverser.Step(item.(*Step))
-		case CommentKind:
-			traverser.Comment(item.(*Comment))
-		case TagKind:
-			traverser.ScenarioTags(item.(*Tags))
-		}
-	}
-}
-
 func (scenario *Scenario) UsesArgsInSteps(args ...string) bool {
 	return UsesArgs(scenario.Steps, args...)
 }
 
 func (scenario Scenario) Kind() TokenKind {
 	return ScenarioKind
+}
+
+func (scn *Scenario) HasAnyHeading(headings []string) bool {
+	for _, heading := range headings {
+		if strings.Compare(scn.Heading.Value, heading) == 0 {
+			return true
+		}
+	}
+	return false
 }

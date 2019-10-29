@@ -24,8 +24,6 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strings"
-
 	"sync"
 
 	"github.com/getgauge/common"
@@ -36,15 +34,11 @@ import (
 	"github.com/getgauge/gauge/gauge_messages"
 	"github.com/getgauge/gauge/logger"
 	"github.com/getgauge/gauge/util"
-	flag "github.com/getgauge/mflag"
 )
 
-// RunFailed represents if this is a re-run of only failed scenarios or a new run
-var RunFailed bool
-
 const (
-	dotGauge   = ".gauge"
-	failedFile = "failures.json"
+	failedFile         = "failures.json"
+	lastRunCmdFileName = "lastRunCmd.json"
 )
 
 var failedMeta *failedMetadata
@@ -54,17 +48,13 @@ func init() {
 }
 
 type failedMetadata struct {
-	Flags          map[string]string
+	Args           []string
 	failedItemsMap map[string]map[string]bool
 	FailedItems    []string
 }
 
-func (m *failedMetadata) String() string {
-	cmd := "gauge "
-	for flag, value := range m.Flags {
-		cmd += "-" + flag + "=" + value + " "
-	}
-	return cmd + strings.Join(m.FailedItems, " ")
+func (m *failedMetadata) args() []string {
+	return append(m.Args, m.FailedItems...)
 }
 
 func (m *failedMetadata) getFailedItems() []string {
@@ -82,19 +72,19 @@ func (m *failedMetadata) aggregateFailedItems() {
 }
 
 func newFailedMetaData() *failedMetadata {
-	return &failedMetadata{Flags: make(map[string]string), failedItemsMap: make(map[string]map[string]bool), FailedItems: []string{}}
+	return &failedMetadata{Args: make([]string, 0), failedItemsMap: make(map[string]map[string]bool), FailedItems: []string{}}
 }
 
 func (m *failedMetadata) addFailedItem(itemName string, item string) {
 	if _, ok := m.failedItemsMap[itemName]; !ok {
-		m.failedItemsMap[itemName] = make(map[string]bool, 0)
+		m.failedItemsMap[itemName] = make(map[string]bool)
 	}
 	m.failedItemsMap[itemName][item] = true
 }
 
 // ListenFailedScenarios listens to execution events and writes the failed scenarios to JSON file
-func ListenFailedScenarios(wg *sync.WaitGroup) {
-	ch := make(chan event.ExecutionEvent, 0)
+func ListenFailedScenarios(wg *sync.WaitGroup, specDirs []string) {
+	ch := make(chan event.ExecutionEvent)
 	event.Register(ch, event.ScenarioEnd)
 	event.Register(ch, event.SpecEnd)
 	event.Register(ch, event.SuiteEnd)
@@ -107,9 +97,9 @@ func ListenFailedScenarios(wg *sync.WaitGroup) {
 			case event.ScenarioEnd:
 				prepareScenarioFailedMetadata(e.Result.(*result.ScenarioResult), e.Item.(*gauge.Scenario), e.ExecutionInfo)
 			case event.SpecEnd:
-				addFailedMetadata(e.Result, addSpecFailedMetadata)
+				addFailedMetadata(e.Result, specDirs, addSpecFailedMetadata)
 			case event.SuiteEnd:
-				addFailedMetadata(e.Result, addSuiteFailedMetadata)
+				addFailedMetadata(e.Result, specDirs, addSuiteFailedMetadata)
 				failedMeta.aggregateFailedItems()
 				writeFailedMeta(getJSON(failedMeta))
 				wg.Done()
@@ -126,17 +116,15 @@ func prepareScenarioFailedMetadata(res *result.ScenarioResult, sce *gauge.Scenar
 	}
 }
 
-func addSpecFailedMetadata(res result.Result) {
+func addSpecFailedMetadata(res result.Result, args []string) {
 	fileName := util.RelPathToProjectRoot(res.(*result.SpecResult).ProtoSpec.GetFileName())
-	if _, ok := failedMeta.failedItemsMap[fileName]; ok {
-		delete(failedMeta.failedItemsMap, fileName)
-	}
+	delete(failedMeta.failedItemsMap, fileName)
 	failedMeta.addFailedItem(fileName, fileName)
 }
 
-func addSuiteFailedMetadata(res result.Result) {
+func addSuiteFailedMetadata(res result.Result, args []string) {
 	failedMeta.failedItemsMap = make(map[string]map[string]bool)
-	for _, arg := range flag.Args() {
+	for _, arg := range args {
 		path, err := filepath.Abs(arg)
 		path = util.RelPathToProjectRoot(path)
 		if err == nil {
@@ -145,72 +133,95 @@ func addSuiteFailedMetadata(res result.Result) {
 	}
 }
 
-func addFailedMetadata(res result.Result, add func(res result.Result)) {
+func addFailedMetadata(res result.Result, args []string, add func(res result.Result, args []string)) {
 	if len(res.GetPostHook()) > 0 || len(res.GetPreHook()) > 0 {
-		add(res)
+		add(res, args)
 	}
 }
 
 func writeFailedMeta(contents string) {
-	failuresFile := filepath.Join(config.ProjectRoot, dotGauge, failedFile)
-	dotGaugeDir := filepath.Join(config.ProjectRoot, dotGauge)
+	failuresFile := filepath.Join(config.ProjectRoot, common.DotGauge, failedFile)
+	dotGaugeDir := filepath.Join(config.ProjectRoot, common.DotGauge)
 	if err := os.MkdirAll(dotGaugeDir, common.NewDirectoryPermissions); err != nil {
-		logger.Fatalf("Failed to create directory in %s. Reason: %s", dotGaugeDir, err.Error())
+		logger.Fatalf(true, "Failed to create directory in %s. Reason: %s", dotGaugeDir, err.Error())
 	}
 	err := ioutil.WriteFile(failuresFile, []byte(contents), common.NewFilePermissions)
 	if err != nil {
-		logger.Fatalf("Failed to write to %s. Reason: %s", failuresFile, err.Error())
+		logger.Fatalf(true, "Failed to write to %s. Reason: %s", failuresFile, err.Error())
 	}
 }
 
 func getJSON(failedMeta *failedMetadata) string {
-	json, err := json.MarshalIndent(failedMeta, "", "\t")
+	j, err := json.MarshalIndent(failedMeta, "", "\t")
 	if err != nil {
-		logger.Warning("Failed to save run info. Reason: %s", err.Error())
+		logger.Warningf(true, "Failed to save run info. Reason: %s", err.Error())
 	}
-	return string(json)
+	return string(j)
 }
 
-func saveFlagState(f *flag.Flag) {
-	failedMeta.Flags[f.Names[0]] = f.Value.String()
+var GetLastFailedState = func() ([]string, error) {
+	meta := readLastFailedState()
+	util.SetWorkingDir(config.ProjectRoot)
+	if len(meta.FailedItems) == 0 {
+		return nil, errors.New("No failed tests found.")
+	}
+	return meta.args(), nil
 }
 
-func setDefault(f *flag.Flag) {
-	f.Value.Set(f.DefValue)
-}
-
-// setFlags sets the flags if its a re-run of failed scenarios. Else, it will save the current execution run for next re-run.
-func setFlags(meta *failedMetadata) {
-	flag.VisitAll(setDefault)
-	contents, err := common.ReadFileContents(filepath.Join(config.ProjectRoot, dotGauge, failedFile))
-	if err != nil {
-		logger.Fatalf("Failed to read last run information. Reason: %s", err.Error())
+func SaveState(args []string, specs []string) {
+	isPresent := func(values []string, value string) bool {
+		for _, v := range values {
+			if v == value {
+				return true
+			}
+		}
+		return false
 	}
-	if err = json.Unmarshal([]byte(contents), &meta); err != nil {
-		logger.Fatalf("Invalid last run information. Reason: %s", err.Error())
-	}
-	failedMeta.Flags = meta.Flags
-	for k, v := range meta.Flags {
-		err = flag.Set(k, v)
-		if err != nil {
-			logger.Warning("Failed to set flag %v to %v. Reason: %v", k, v, err.Error())
+	for _, a := range args {
+		if !isPresent(specs, a) {
+			failedMeta.Args = append(failedMeta.Args, a)
 		}
 	}
-	flag.CommandLine.Parse(meta.FailedItems)
 }
 
-// Initialize sets up rerun and determines whether any failed tests will be executed or not
-func Initialize() error {
-	if !RunFailed {
-		flag.Visit(saveFlagState)
+func readLastFailedState() *failedMetadata {
+	contents, err := common.ReadFileContents(filepath.Join(config.ProjectRoot, common.DotGauge, failedFile))
+	if err != nil {
+		logger.Fatalf(true, "Failed to read last run information. Reason: %s", err.Error())
+	}
+	meta := newFailedMetaData()
+	if err = json.Unmarshal([]byte(contents), meta); err != nil {
+		logger.Fatalf(true, "Invalid last run information. Reason: %s", err.Error())
+	}
+	return meta
+}
+
+var ReadPrevArgs = func() []string {
+	contents, err := common.ReadFileContents(filepath.Join(config.ProjectRoot, common.DotGauge, lastRunCmdFileName))
+	if err != nil {
+		logger.Fatalf(true, "Failed to read previous command information. Reason: %s", err.Error())
 		return nil
 	}
-	meta := new(failedMetadata)
-	setFlags(meta)
-	util.SetWorkingDir(config.ProjectRoot)
-	if RunFailed && len(meta.FailedItems) == 0 {
-		return errors.New("No failed tests found.")
+	var args []string
+	if err = json.Unmarshal([]byte(contents), &args); err != nil {
+		logger.Fatalf(true, "Invalid previous command information. Reason: %s", err.Error())
+		return nil
 	}
-	fmt.Printf("Executing => %s\n", meta.String())
-	return nil
+	return args
+}
+
+var WritePrevArgs = func(cmdArgs []string) {
+	b, err := json.MarshalIndent(cmdArgs, "", "\t")
+	if err != nil {
+		logger.Fatalf(true, "Unable to parse last run command. Error : %v", err.Error())
+	}
+	prevCmdFile := filepath.Join(config.ProjectRoot, common.DotGauge, lastRunCmdFileName)
+	dotGaugeDir := filepath.Join(config.ProjectRoot, common.DotGauge)
+	if err = os.MkdirAll(dotGaugeDir, common.NewDirectoryPermissions); err != nil {
+		logger.Fatalf(true, "Failed to create directory in %s. Reason: %s", dotGaugeDir, err.Error())
+	}
+	err = ioutil.WriteFile(prevCmdFile, b, common.NewFilePermissions)
+	if err != nil {
+		logger.Fatalf(true, "Failed to write to %s. Reason: %s", prevCmdFile, err.Error())
+	}
 }

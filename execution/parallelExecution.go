@@ -19,16 +19,17 @@ package execution
 
 import (
 	"fmt"
+	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"os"
-
 	"github.com/getgauge/common"
 	"github.com/getgauge/gauge/config"
 	"github.com/getgauge/gauge/conn"
+	"github.com/getgauge/gauge/env"
 	"github.com/getgauge/gauge/execution/event"
 	"github.com/getgauge/gauge/execution/result"
 	"github.com/getgauge/gauge/filter"
@@ -37,26 +38,27 @@ import (
 	"github.com/getgauge/gauge/logger"
 	"github.com/getgauge/gauge/manifest"
 	"github.com/getgauge/gauge/plugin"
-	"github.com/getgauge/gauge/reporter"
 	"github.com/getgauge/gauge/runner"
-	"github.com/getgauge/gauge/util"
 )
 
+// Strategy for execution, can be either 'Eager' or 'Lazy'
 var Strategy string
 
+// Eager is a parallelization strategy for execution. In this case tests are distributed before execution, thus making them an equal number based distribution.
 const Eager string = "eager"
+
+// Lazy is a parallelization strategy for execution. In this case tests assignment will be dynamic during execution, i.e. assign the next spec in line to the stream that has completed it’s previous execution and is waiting for more work.
 const Lazy string = "lazy"
-const enableMultithreadingEnv = "enable_multithreading"
 
 type parallelExecution struct {
 	wg                       sync.WaitGroup
 	manifest                 *manifest.Manifest
 	specCollection           *gauge.SpecCollection
 	pluginHandler            plugin.Handler
-	currentExecutionInfo     *gauge_messages.ExecutionInfo
 	runner                   runner.Runner
 	suiteResult              *result.SuiteResult
 	numberOfExecutionStreams int
+	tagsToFilter             string
 	errMaps                  *gauge.BuildErrors
 	startTime                time.Time
 }
@@ -68,6 +70,7 @@ func newParallelExecution(e *executionInfo) *parallelExecution {
 		runner:                   e.runner,
 		pluginHandler:            e.pluginHandler,
 		numberOfExecutionStreams: e.numberOfStreams,
+		tagsToFilter:             e.tagsToFilter,
 		errMaps:                  e.errMaps,
 	}
 }
@@ -102,13 +105,25 @@ func (e *parallelExecution) start() {
 
 func (e *parallelExecution) run() *result.SuiteResult {
 	e.start()
+	var res []*result.SuiteResult
+	if env.AllowFilteredParallelExecution() && e.tagsToFilter != "" {
+		p, s := filter.FilterSpecForParallelRun(e.specCollection.Specs(), e.tagsToFilter)
+		if Verbose {
+			printAdditionalExecutionInfo(p, s, e.tagsToFilter)
+		}
+		if len(s) > 0 {
+			logger.Infof(true, "Executing %d specs in serial.", len(s))
+			e.specCollection = gauge.NewSpecCollection(p, false)
+			res = append(res, e.executeSpecsInSerial(gauge.NewSpecCollection(s, true)))
+		}
+	}
 
 	nStreams := e.numberOfStreams()
-	logger.Info("Executing in %s parallel streams.", strconv.Itoa(nStreams))
-
+	logger.Infof(true, "Executing in %s parallel streams.", strconv.Itoa(nStreams))
 	resChan := make(chan *result.SuiteResult)
+
 	if e.isMultithreaded() {
-		logger.Debug("Using multithreading for parallel execution.")
+		logger.Debugf(true, "Using multithreading for parallel execution.")
 		go e.executeMultithreaded(nStreams, resChan)
 	} else if isLazy() {
 		go e.executeLazily(nStreams, resChan)
@@ -116,7 +131,6 @@ func (e *parallelExecution) run() *result.SuiteResult {
 		go e.executeEagerly(nStreams, resChan)
 	}
 
-	var res []*result.SuiteResult
 	for r := range resChan {
 		res = append(res, r)
 	}
@@ -124,6 +138,12 @@ func (e *parallelExecution) run() *result.SuiteResult {
 
 	e.finish()
 	return e.suiteResult
+}
+
+func printAdditionalExecutionInfo(p []*gauge.Specification, s []*gauge.Specification, tags string) {
+	logger.Infof(true, "Applied tags '%s' to filter specs for parallel execution", tags)
+	logger.Infof(true, "No of specs to be executed in serial : %d", len(s))
+	logger.Infof(true, "No of specs to be executed in parallel : %d", len(p))
 }
 
 func (e *parallelExecution) executeLazily(totalStreams int, resChan chan *result.SuiteResult) {
@@ -152,7 +172,8 @@ func (e *parallelExecution) executeMultithreaded(totalStreams int, resChan chan 
 		handlers = append(handlers, handler)
 	}
 	os.Setenv("GAUGE_API_PORTS", strings.Join(ports, ","))
-	r, err := runner.StartRunner(e.manifest, "0", reporter.ParallelReporter(0), make(chan bool), false)
+	writer := logger.NewLogWriter(e.manifest.Language, true, 0)
+	r, err := runner.StartRunner(e.manifest, "0", writer, make(chan bool), false)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -167,7 +188,10 @@ func (e *parallelExecution) executeMultithreaded(totalStreams int, resChan chan 
 		go e.startMultithreaded(crapRunner, resChan, i+1)
 	}
 	e.wg.Wait()
-	r.Cmd.Process.Kill()
+	err = r.Cmd.Process.Kill()
+	if err != nil {
+		fmt.Printf("unable to kill runner: %s", err.Error())
+	}
 	close(resChan)
 }
 
@@ -180,7 +204,7 @@ func (e *parallelExecution) executeEagerly(distributions int, resChan chan *resu
 	specs := filter.DistributeSpecs(e.specCollection.Specs(), distributions)
 	e.wg.Add(distributions)
 	for i, s := range specs {
-		go e.startSpecsExecution(s, resChan, i+1)
+		go e.startStream(s, resChan, i+1)
 	}
 	e.wg.Wait()
 	close(resChan)
@@ -188,33 +212,55 @@ func (e *parallelExecution) executeEagerly(distributions int, resChan chan *resu
 
 func (e *parallelExecution) startStream(s *gauge.SpecCollection, resChan chan *result.SuiteResult, stream int) {
 	defer e.wg.Done()
-	runner, err := runner.Start(e.manifest, reporter.ParallelReporter(stream), make(chan bool), false)
-	if err != nil {
-		logger.Errorf("Failed to start runner. %s", err.Error())
-		resChan <- &result.SuiteResult{UnhandledErrors: []error{fmt.Errorf("Failed to start runner. %s", err.Error())}}
+	runner, err := e.startRunner(s, stream)
+	if len(err) > 0 {
+		resChan <- &result.SuiteResult{UnhandledErrors: err}
 		return
 	}
 	e.startSpecsExecutionWithRunner(s, resChan, runner, stream)
 }
 
-func (e *parallelExecution) startSpecsExecution(s *gauge.SpecCollection, resChan chan *result.SuiteResult, stream int) {
-	defer e.wg.Done()
-	runner, err := runner.Start(e.manifest, reporter.ParallelReporter(stream), make(chan bool), false)
-	if err != nil {
-		logger.Errorf("Failed to start runner. %s", err.Error())
-		logger.Debug("Skipping %d specifications", s.Size())
-		resChan <- &result.SuiteResult{UnhandledErrors: []error{streamExecError{specsSkipped: s.SpecNames(), message: fmt.Sprintf("Failed to start runner. %s", err.Error())}}}
-		return
+func (e *parallelExecution) startRunner(s *gauge.SpecCollection, stream int) (runner.Runner, []error) {
+	if os.Getenv("GAUGE_CUSTOM_BUILD_PATH") == "" {
+		os.Setenv("GAUGE_CUSTOM_BUILD_PATH", path.Join(os.Getenv("GAUGE_PROJECT_ROOT"), "gauge_bin"))
 	}
-	e.startSpecsExecutionWithRunner(s, resChan, runner, stream)
+	runner, err := runner.Start(e.manifest, logger.NewLogWriter(e.manifest.Language, true, stream), make(chan bool), false)
+	if err != nil {
+		logger.Errorf(true, "Failed to start runner. %s", err.Error())
+		logger.Debugf(true, "Skipping %d specifications", s.Size())
+		if isLazy() {
+			return nil, []error{fmt.Errorf("Failed to start runner. %s", err.Error())}
+		}
+		return nil, []error{streamExecError{specsSkipped: s.SpecNames(), message: fmt.Sprintf("Failed to start runner. %s", err.Error())}}
+	}
+	return runner, nil
 }
 
 func (e *parallelExecution) startSpecsExecutionWithRunner(s *gauge.SpecCollection, resChan chan *result.SuiteResult, runner runner.Runner, stream int) {
 	executionInfo := newExecutionInfo(s, runner, e.pluginHandler, e.errMaps, false, stream)
 	se := newSimpleExecution(executionInfo, false)
 	se.execute()
-	runner.Kill()
+	err := runner.Kill()
+	if err != nil {
+		logger.Errorf(true, "Failed to kill runner. %s", err.Error())
+	}
 	resChan <- se.suiteResult
+}
+
+func (e *parallelExecution) executeSpecsInSerial(s *gauge.SpecCollection) *result.SuiteResult {
+	runner, err := e.startRunner(s, 1)
+	if err != nil {
+		return &result.SuiteResult{UnhandledErrors: err}
+	}
+	executionInfo := newExecutionInfo(s, runner, e.pluginHandler, e.errMaps, false, 1)
+	se := newSimpleExecution(executionInfo, false)
+	se.execute()
+	er := runner.Kill()
+	if er != nil {
+		logger.Errorf(true, "Failed to kill runner. %s", er.Error())
+	}
+
+	return se.suiteResult
 }
 
 func (e *parallelExecution) finish() {
@@ -263,12 +309,11 @@ func isValidStrategy(strategy string) bool {
 }
 
 func (e *parallelExecution) isMultithreaded() bool {
-	value := util.ConvertToBool(os.Getenv(enableMultithreadingEnv), enableMultithreadingEnv, false)
-	if !value {
+	if !env.EnableMultiThreadedExecution() {
 		return false
 	}
 	if !e.runner.IsMultithreaded() {
-		logger.Warning("Runner doesn't support mutithreading, using multiprocess parallel execution.")
+		logger.Warningf(true, "Runner doesn't support mutithreading, using multiprocess parallel execution.")
 		return false
 	}
 	return true

@@ -38,14 +38,23 @@ type templateMetadata struct {
 func initializeTemplate(templateName string) error {
 	tempDir := common.GetTempDir()
 	defer util.Remove(tempDir)
-	unzippedTemplate, err := util.DownloadAndUnzip(getTemplateURL(templateName), tempDir)
+	templateURL := getTemplateURL(templateName)
+	logger.Debugf(true, "Initializing template from %s", templateURL)
+	unzippedTemplate, err := util.DownloadAndUnzip(templateURL, tempDir)
 	if err != nil {
 		return err
 	}
 
 	wd := config.ProjectRoot
 
-	logger.Info("Copying Gauge template %s to current directory ...", templateName)
+	if common.FileExists(gitignoreFileName) {
+		templateGitIgnore := filepath.Join(unzippedTemplate, templateName, gitignoreFileName)
+		if err := common.AppendToFile(gitignoreFileName, templateGitIgnore); err != nil {
+			return err
+		}
+	}
+
+	logger.Infof(true, "Copying Gauge template %s to current directory ...", templateName)
 	filesAdded, err := common.MirrorDir(filepath.Join(unzippedTemplate, templateName), wd)
 	if err != nil {
 		return fmt.Errorf("Failed to copy Gauge template: %s", err.Error())
@@ -64,6 +73,7 @@ func initializeTemplate(templateName string) error {
 	}
 
 	if metadata.PostInstallCmd != "" {
+		logger.Debugf(true, "Running post install command %s", metadata.PostInstallCmd)
 		command := strings.Fields(metadata.PostInstallCmd)
 		cmd, err := common.ExecuteSystemCommand(command, wd, os.Stdout, os.Stderr)
 		if err != nil {
@@ -77,7 +87,7 @@ func initializeTemplate(templateName string) error {
 			return err
 		}
 	}
-	fmt.Printf("Successfully initialized the project. %s\n", metadata.PostInstallMsg)
+	logger.Infof(true, "Successfully initialized the project. %s\n", metadata.PostInstallMsg)
 
 	util.Remove(metadataFile)
 	return nil
@@ -87,54 +97,53 @@ func getTemplateURL(templateName string) string {
 	return config.GaugeTemplatesUrl() + "/" + templateName + ".zip"
 }
 
-func getTemplateLangauge(templateName string) string {
+func getTemplateLanguage(templateName string) string {
 	return strings.Split(templateName, "_")[0]
 }
 
 func isGaugeProject() bool {
 	m, err := manifest.ProjectManifest()
 	if err != nil {
-		logger.Debug("Gauge manifest file doesn't exist. %s", err.Error())
+		logger.Debugf(true, "Gauge manifest file doesn't exist. %s", err.Error())
 		return false
 	}
 	return m.Language != ""
 }
 
-func installRunner(templateName string) {
-	language := getTemplateLangauge(templateName)
+func installRunner(templateName string, silent bool) {
+	language := getTemplateLanguage(templateName)
 	if !install.IsCompatiblePluginInstalled(language, true) {
-		logger.Info("Compatible langauge plugin %s is not installed. Installing plugin...", language)
+		logger.Infof(true, "Compatible language plugin %s is not installed. Installing plugin...", language)
 
-		install.HandleInstallResult(install.InstallPlugin(language, ""), language, true)
+		install.HandleInstallResult(install.Plugin(language, "", silent), language, true)
 	}
 }
 
 // InitializeProject initializes a Gauge project with specified template
-func InitializeProject(templateName string) {
+func InitializeProject(templateName string, silent bool) {
 	wd, err := os.Getwd()
 	if err != nil {
-		logger.Fatalf("Failed to find working directory. %s", err.Error())
+		logger.Fatalf(true, "Failed to find working directory. %s", err.Error())
 	}
 	config.ProjectRoot = wd
 	if isGaugeProject() {
-		logger.Fatalf("This is already a Gauge Project. Please try to initialize a Gauge project in a different location.")
+		logger.Fatalf(true, "This is already a Gauge Project. Please try to initialize a Gauge project in a different location.")
 	}
-
 	exists, _ := common.UrlExists(getTemplateURL(templateName))
 	if exists {
 		err = initializeTemplate(templateName)
-		installRunner(templateName)
+		installRunner(templateName, silent)
 	} else {
-		installRunner(templateName)
+		installRunner(templateName, silent)
 		err = createProjectTemplate(templateName)
 	}
 	if err != nil {
-		logger.Fatalf("Failed to initialize project. %s", err.Error())
+		logger.Fatalf(true, "Failed to initialize project. %s", err.Error())
 	}
 }
 
 func showMessage(action, filename string) {
-	logger.Info(" %s  %s", action, filename)
+	logger.Infof(true, " %s  %s", action, filename)
 }
 
 func createProjectTemplate(language string) error {
@@ -156,7 +165,7 @@ func createProjectTemplate(language string) error {
 	if err := createEnvDirectory(); err != nil {
 		return err
 	}
-	fmt.Printf("Successfully initialized the project. Run specifications with \"gauge specs/\".\n")
+	fmt.Println("Successfully initialized the project. Run specifications with \"gauge run specs/\".")
 	return nil
 }
 

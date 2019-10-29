@@ -26,27 +26,41 @@ import (
 	"strconv"
 	"strings"
 
+	"fmt"
+
 	"github.com/getgauge/gauge/gauge"
 	"github.com/getgauge/gauge/logger"
 )
 
 type scenarioFilterBasedOnSpan struct {
-	lineNumber int
+	lineNumbers []int
 }
 type ScenarioFilterBasedOnTags struct {
 	specTags      []string
 	tagExpression string
 }
 
-func NewScenarioFilterBasedOnSpan(lineNumber int) *scenarioFilterBasedOnSpan {
-	return &scenarioFilterBasedOnSpan{lineNumber}
+type scenarioFilterBasedOnName struct {
+	scenariosName []string
+}
+
+func NewScenarioFilterBasedOnSpan(lineNumbers []int) *scenarioFilterBasedOnSpan {
+	return &scenarioFilterBasedOnSpan{lineNumbers}
 }
 
 func (filter *scenarioFilterBasedOnSpan) Filter(item gauge.Item) bool {
-	return (item.Kind() == gauge.ScenarioKind) && !(item.(*gauge.Scenario).InSpan(filter.lineNumber))
+	if item.Kind() != gauge.ScenarioKind {
+		return false
+	}
+	for _, lineNumber := range filter.lineNumbers {
+		if item.(*gauge.Scenario).InSpan(lineNumber) {
+			return false
+		}
+	}
+	return true
 }
 
-func newScenarioFilterBasedOnTags(specTags []string, tagExp string) *ScenarioFilterBasedOnTags {
+func NewScenarioFilterBasedOnTags(specTags []string, tagExp string) *ScenarioFilterBasedOnTags {
 	return &ScenarioFilterBasedOnTags{specTags, tagExp}
 }
 
@@ -56,14 +70,33 @@ func (filter *ScenarioFilterBasedOnTags) Filter(item gauge.Item) bool {
 		if tags == nil {
 			return !filter.filterTags(filter.specTags)
 		}
-		return !filter.filterTags(append(tags.Values, filter.specTags...))
+		return !filter.filterTags(append(tags.Values(), filter.specTags...))
 	}
 	return false
 }
 
+func newScenarioFilterBasedOnName(scenariosName []string) *scenarioFilterBasedOnName {
+	return &scenarioFilterBasedOnName{scenariosName}
+}
+
+func (filter *scenarioFilterBasedOnName) Filter(item gauge.Item) bool {
+	if item.Kind() != gauge.ScenarioKind {
+		return false
+	}
+	return !item.(*gauge.Scenario).HasAnyHeading(filter.scenariosName)
+}
+
+func sanitize(tag string) string {
+	if _, err := strconv.ParseBool(tag); err == nil {
+		return fmt.Sprintf("{%s}", tag)
+	}
+	return tag
+}
+
 func (filter *ScenarioFilterBasedOnTags) filterTags(stags []string) bool {
-	tagsMap := make(map[string]bool, 0)
+	tagsMap := make(map[string]bool)
 	for _, tag := range stags {
+		tag = sanitize(tag)
 		tagsMap[strings.Replace(tag, " ", "", -1)] = true
 	}
 	filter.replaceSpecialChar()
@@ -112,7 +145,7 @@ func (filter *ScenarioFilterBasedOnTags) resolveBracketExpression(tagExpression 
 		if tagExpression[i] == '(' {
 			bracketStack = append(bracketStack, "(")
 		} else if tagExpression[i] == ')' {
-			bracketStack = append(bracketStack[:len(bracketStack)-1])
+			bracketStack = bracketStack[:len(bracketStack)-1]
 		}
 		if len(bracketStack) == 0 {
 			break
@@ -151,12 +184,15 @@ func (filter *ScenarioFilterBasedOnTags) isTagPresent(tagsMap map[string]bool, t
 func (filter *ScenarioFilterBasedOnTags) parseTagExpression() (tagExpressionParts []string, tags []string) {
 	isValidOperator := func(r rune) bool { return r == '&' || r == '|' || r == '(' || r == ')' || r == '!' }
 	var word string
+	var wordValue = func() string {
+		return sanitize(strings.TrimSpace(word))
+	}
 	for _, c := range filter.tagExpression {
 		c1, _ := strconv.Unquote(strconv.QuoteRuneToASCII(c))
 		if isValidOperator(c) {
 			if word != "" {
-				tagExpressionParts = append(tagExpressionParts, strings.TrimSpace(word))
-				tags = append(tags, strings.TrimSpace(word))
+				tagExpressionParts = append(tagExpressionParts, wordValue())
+				tags = append(tags, wordValue())
 			}
 			tagExpressionParts = append(tagExpressionParts, c1)
 			word = ""
@@ -165,43 +201,79 @@ func (filter *ScenarioFilterBasedOnTags) parseTagExpression() (tagExpressionPart
 		}
 	}
 	if word != "" {
-		tagExpressionParts = append(tagExpressionParts, strings.TrimSpace(word))
-		tags = append(tags, strings.TrimSpace(word))
+		tagExpressionParts = append(tagExpressionParts, wordValue())
+		tags = append(tags, wordValue())
 	}
 	return
 }
 
-func FilterSpecsItems(specs []*gauge.Specification, filter gauge.SpecItemFilter) []*gauge.Specification {
+func filterSpecsByTags(specs []*gauge.Specification, tagExpression string) ([]*gauge.Specification, []*gauge.Specification) {
 	filteredSpecs := make([]*gauge.Specification, 0)
-	for _, spec := range specs {
-		spec.Filter(filter)
-		if len(spec.Scenarios) != 0 {
-			filteredSpecs = append(filteredSpecs, spec)
-		}
-	}
-	return filteredSpecs
-}
-
-func filterSpecsByTags(specs []*gauge.Specification, tagExpression string) []*gauge.Specification {
-	filteredSpecs := make([]*gauge.Specification, 0)
+	otherSpecs := make([]*gauge.Specification, 0)
 	for _, spec := range specs {
 		tagValues := make([]string, 0)
 		if spec.Tags != nil {
-			tagValues = spec.Tags.Values
+			tagValues = spec.Tags.Values()
 		}
-		spec.Filter(newScenarioFilterBasedOnTags(tagValues, tagExpression))
-		if len(spec.Scenarios) != 0 {
-			filteredSpecs = append(filteredSpecs, spec)
+		specWithFilteredItems, specWithOtherItems := spec.Filter(NewScenarioFilterBasedOnTags(tagValues, tagExpression))
+		if len(specWithFilteredItems.Scenarios) != 0 {
+			filteredSpecs = append(filteredSpecs, specWithFilteredItems)
+		}
+		if len(specWithOtherItems.Scenarios) != 0 {
+			otherSpecs = append(otherSpecs, specWithOtherItems)
 		}
 	}
-	return filteredSpecs
+	return filteredSpecs, otherSpecs
 }
 
 func validateTagExpression(tagExpression string) {
 	filter := &ScenarioFilterBasedOnTags{tagExpression: tagExpression}
 	filter.replaceSpecialChar()
-	_, err := filter.formatAndEvaluateExpression(make(map[string]bool, 0), func(a map[string]bool, b string) bool { return true })
+	_, err := filter.formatAndEvaluateExpression(make(map[string]bool), func(a map[string]bool, b string) bool { return true })
 	if err != nil {
-		logger.Fatalf(err.Error())
+		logger.Fatalf(true, err.Error())
 	}
+}
+
+func filterSpecsByScenarioName(specs []*gauge.Specification, scenariosName []string) []*gauge.Specification {
+	filteredSpecs := make([]*gauge.Specification, 0)
+	scenarios := filterValidScenarios(specs, scenariosName)
+	for _, spec := range specs {
+		s, _ := spec.Filter(newScenarioFilterBasedOnName(scenarios))
+		if len(s.Scenarios) != 0 {
+			filteredSpecs = append(filteredSpecs, s)
+		}
+	}
+	return filteredSpecs
+}
+
+func filterValidScenarios(specs []*gauge.Specification, headings []string) []string {
+	filteredScenarios := make([]string, 0)
+	allScenarios := GetAllScenarios(specs)
+	var exists = func(scenarios []string, heading string) bool {
+		for _, scenario := range scenarios {
+			if strings.Compare(scenario, heading) == 0 {
+				return true
+			}
+		}
+		return false
+	}
+	for _, heading := range headings {
+		if exists(allScenarios, heading) {
+			filteredScenarios = append(filteredScenarios, heading)
+		} else {
+			logger.Warningf(true, "Warning: scenario name - \"%s\" not found", heading)
+		}
+	}
+	return filteredScenarios
+}
+
+func GetAllScenarios(specs []*gauge.Specification) []string {
+	allScenarios := []string{}
+	for _, spec := range specs {
+		for _, scenario := range spec.Scenarios {
+			allScenarios = append(allScenarios, scenario.Heading.Value)
+		}
+	}
+	return allScenarios
 }

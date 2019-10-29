@@ -25,15 +25,6 @@ import (
 	. "gopkg.in/check.v1"
 )
 
-type testLogger struct {
-	output string
-}
-
-func (l *testLogger) Write(b []byte) (int, error) {
-	l.output = string(b)
-	return len(b), nil
-}
-
 func (s *MySuite) TestFunctionsOfTypeSpecList(c *C) {
 	mySpecs := gauge.NewSpecCollection(createSpecsList(4), false)
 	c.Assert(mySpecs.Next()[0].FileName, Equals, "spec0")
@@ -80,12 +71,12 @@ func (s *MySuite) TestValidateFlagsWithInvalidStrategy(c *C) {
 	Strategy = "sdf"
 	NumberOfExecutionStreams = 1
 	err := validateFlags()
-	c.Assert(err.Error(), Equals, "Invalid input(sdf) to --strategy flag.")
+	c.Assert(err.Error(), Equals, "invalid input(sdf) to --strategy flag")
 }
 
 func (s *MySuite) TestValidateFlagsWithInvalidStream(c *C) {
 	InParallel = true
 	NumberOfExecutionStreams = -1
 	err := validateFlags()
-	c.Assert(err.Error(), Equals, "Invalid input(-1) to --n flag.")
+	c.Assert(err.Error(), Equals, "invalid input(-1) to --n flag")
 }

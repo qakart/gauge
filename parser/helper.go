@@ -90,6 +90,7 @@ func arrayContains(array []string, toFind string) bool {
 	return false
 }
 
+// GetUnescapedString uses the go escape sequences to escape control characters and non printable characters.
 func GetUnescapedString(string1 string) string {
 	unescaped := strconv.Quote(string1)
 	return unescaped[1 : len(unescaped)-1]

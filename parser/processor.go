@@ -58,7 +58,11 @@ func processComment(parser *SpecParser, token *Token) ([]error, bool) {
 }
 
 func processTag(parser *SpecParser, token *Token) ([]error, bool) {
-	parser.clearState()
+	if isInState(parser.currentState, tagsScope) {
+		retainStates(&parser.currentState, tagsScope)
+	} else {
+		parser.clearState()
+	}
 	tokens := splitAndTrimTags(token.Value)
 
 	for _, tagValue := range tokens {
@@ -78,7 +82,10 @@ func processTable(parser *SpecParser, token *Token) ([]error, bool) {
 			continue
 		}
 		if shouldEscape {
-			buffer.WriteRune(element)
+			_, err := buffer.WriteRune(element)
+			if err != nil {
+				errs = append(errs, err)
+			}
 			shouldEscape = false
 			continue
 		}
@@ -98,7 +105,10 @@ func processTable(parser *SpecParser, token *Token) ([]error, bool) {
 			token.Args = append(token.Args, trimmedValue)
 			buffer.Reset()
 		} else {
-			buffer.WriteRune(element)
+			_, err := buffer.WriteRune(element)
+			if err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 

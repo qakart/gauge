@@ -22,10 +22,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"os"
-
 	"github.com/fsnotify/fsnotify"
-	"github.com/getgauge/common"
 	"github.com/getgauge/gauge/config"
 	"github.com/getgauge/gauge/gauge"
 	"github.com/getgauge/gauge/gauge_messages"
@@ -41,6 +38,8 @@ type SpecInfoGatherer struct {
 	specsCache        specsCache
 	conceptsCache     conceptCache
 	stepsCache        stepsCache
+	paramsCache       paramsCache
+	tagsCache         tagsCache
 	SpecDirs          []string
 }
 
@@ -50,13 +49,24 @@ type conceptCache struct {
 }
 
 type stepsCache struct {
-	mutex      sync.RWMutex
-	stepValues map[string][]*gauge.StepValue
+	mutex sync.RWMutex
+	steps map[string][]*gauge.Step
 }
 
 type specsCache struct {
 	mutex       sync.RWMutex
 	specDetails map[string]*SpecDetail
+}
+
+type paramsCache struct {
+	mutex         sync.RWMutex
+	staticParams  map[string]map[string]gauge.StepArg
+	dynamicParams map[string]map[string]gauge.StepArg
+}
+
+type tagsCache struct {
+	mutex sync.RWMutex
+	tags  map[string][]string
 }
 
 type SpecDetail struct {
@@ -68,8 +78,12 @@ func (d *SpecDetail) HasSpec() bool {
 	return d.Spec != nil && d.Spec.Heading != nil
 }
 
-// MakeListOfAvailableSteps initializes all the SpecInfoGatherer caches
-func (s *SpecInfoGatherer) MakeListOfAvailableSteps() {
+func NewSpecInfoGatherer(conceptDictionary *gauge.ConceptDictionary) *SpecInfoGatherer {
+	return &SpecInfoGatherer{conceptDictionary: conceptDictionary, conceptsCache: conceptCache{concepts: make(map[string][]*gauge.Concept)}}
+}
+
+// Init initializes all the SpecInfoGatherer caches
+func (s *SpecInfoGatherer) Init() {
 	go s.watchForFileChanges()
 	s.waitGroup.Wait()
 
@@ -77,6 +91,35 @@ func (s *SpecInfoGatherer) MakeListOfAvailableSteps() {
 	s.initConceptsCache()
 	s.initSpecsCache()
 	s.initStepsCache()
+	s.initParamsCache()
+	s.initTagsCache()
+}
+func (s *SpecInfoGatherer) initTagsCache() {
+	s.tagsCache.mutex.Lock()
+	defer s.tagsCache.mutex.Unlock()
+	s.specsCache.mutex.Lock()
+	s.tagsCache.tags = make(map[string][]string)
+	for file, specDetail := range s.specsCache.specDetails {
+		s.updateTagsCacheFromSpecs(file, specDetail)
+	}
+	defer s.specsCache.mutex.Unlock()
+}
+
+func (s *SpecInfoGatherer) initParamsCache() {
+	s.paramsCache.mutex.Lock()
+	defer s.paramsCache.mutex.Unlock()
+	s.specsCache.mutex.Lock()
+	s.paramsCache.staticParams = make(map[string]map[string]gauge.StepArg)
+	s.paramsCache.dynamicParams = make(map[string]map[string]gauge.StepArg)
+	for file, specDetail := range s.specsCache.specDetails {
+		s.updateParamCacheFromSpecs(file, specDetail)
+	}
+	s.specsCache.mutex.Unlock()
+	s.conceptsCache.mutex.Lock()
+	for file, concepts := range s.conceptsCache.concepts {
+		s.updateParamsCacheFromConcepts(file, concepts)
+	}
+	s.conceptsCache.mutex.Unlock()
 }
 
 func (s *SpecInfoGatherer) initSpecsCache() {
@@ -85,11 +128,11 @@ func (s *SpecInfoGatherer) initSpecsCache() {
 	s.specsCache.mutex.Lock()
 	defer s.specsCache.mutex.Unlock()
 
-	s.specsCache.specDetails = make(map[string]*SpecDetail, 0)
+	s.specsCache.specDetails = make(map[string]*SpecDetail)
 
-	logger.APILog.Info("Initializing specs cache with %d specs", len(details))
+	logger.Infof(false, "Initializing specs cache with %d specs", len(details))
 	for _, d := range details {
-		logger.APILog.Debug("Adding specs from %s", d.Spec.FileName)
+		logger.Debugf(false, "Adding specs from %s", d.Spec.FileName)
 		s.addToSpecsCache(d.Spec.FileName, d)
 	}
 }
@@ -107,10 +150,10 @@ func (s *SpecInfoGatherer) initConceptsCache() {
 	defer s.conceptsCache.mutex.Unlock()
 
 	parsedConcepts := s.getParsedConcepts()
-	s.conceptsCache.concepts = make(map[string][]*gauge.Concept, 0)
-	logger.APILog.Info("Initializing concepts cache with %d concepts", len(parsedConcepts))
+	s.conceptsCache.concepts = make(map[string][]*gauge.Concept)
+	logger.Infof(false, "Initializing concepts cache with %d concepts", len(parsedConcepts))
 	for _, concept := range parsedConcepts {
-		logger.APILog.Debug("Adding concepts from %s", concept.FileName)
+		logger.Debugf(false, "Adding concepts from %s", concept.FileName)
 		s.addToConceptsCache(concept.FileName, concept)
 	}
 }
@@ -119,7 +162,7 @@ func (s *SpecInfoGatherer) initStepsCache() {
 	s.stepsCache.mutex.Lock()
 	defer s.stepsCache.mutex.Unlock()
 
-	s.stepsCache.stepValues = make(map[string][]*gauge.StepValue, 0)
+	s.stepsCache.steps = make(map[string][]*gauge.Step)
 	stepsFromSpecsMap := s.getStepsFromCachedSpecs()
 	stepsFromConceptsMap := s.getStepsFromCachedConcepts()
 
@@ -129,7 +172,66 @@ func (s *SpecInfoGatherer) initStepsCache() {
 	for filename, steps := range stepsFromSpecsMap {
 		s.addToStepsCache(filename, steps)
 	}
-	logger.APILog.Info("Initializing steps cache with %d steps", len(stepsFromSpecsMap)+len(stepsFromConceptsMap))
+	logger.Infof(false, "Initializing steps cache with %d steps", len(stepsFromSpecsMap)+len(stepsFromConceptsMap))
+}
+
+func (s *SpecInfoGatherer) updateParamsCacheFromConcepts(file string, concepts []*gauge.Concept) {
+	s.paramsCache.staticParams[file] = make(map[string]gauge.StepArg)
+	s.paramsCache.dynamicParams[file] = make(map[string]gauge.StepArg)
+	for _, concept := range concepts {
+		s.addParamsFromSteps([]*gauge.Step{concept.ConceptStep}, file)
+		s.addParamsFromSteps(concept.ConceptStep.ConceptSteps, file)
+	}
+}
+
+func (s *SpecInfoGatherer) updateParamCacheFromSpecs(file string, specDetail *SpecDetail) {
+	s.paramsCache.staticParams[file] = make(map[string]gauge.StepArg)
+	s.paramsCache.dynamicParams[file] = make(map[string]gauge.StepArg)
+	s.addParamsFromSteps(specDetail.Spec.Contexts, file)
+	for _, sce := range specDetail.Spec.Scenarios {
+		s.addParamsFromSteps(sce.Steps, file)
+	}
+	s.addParamsFromSteps(specDetail.Spec.TearDownSteps, file)
+	if specDetail.Spec.DataTable.IsInitialized() {
+		for _, header := range specDetail.Spec.DataTable.Table.Headers {
+			s.paramsCache.dynamicParams[file][header] = gauge.StepArg{Value: header, ArgType: gauge.Dynamic}
+		}
+	}
+}
+
+func (s *SpecInfoGatherer) addParamsFromSteps(steps []*gauge.Step, file string) {
+	for _, step := range steps {
+		for _, arg := range step.Args {
+			if arg.ArgType == gauge.Static {
+				s.paramsCache.staticParams[file][arg.ArgValue()] = *arg
+			} else {
+				s.paramsCache.dynamicParams[file][arg.ArgValue()] = *arg
+			}
+		}
+	}
+}
+
+func (s *SpecInfoGatherer) updateTagsCacheFromSpecs(file string, specDetail *SpecDetail) {
+	if specDetail.Spec.Tags != nil {
+		s.tagsCache.tags[file] = specDetail.Spec.Tags.Values()
+	}
+	for _, sce := range specDetail.Spec.Scenarios {
+		if sce.Tags != nil {
+			s.tagsCache.tags[file] = append(s.tagsCache.tags[file], sce.Tags.Values()...)
+		}
+	}
+}
+
+func removeDuplicateTags(tags []string) []string {
+	encountered := map[string]bool{}
+	result := []string{}
+	for i := range tags {
+		if !encountered[tags[i]] {
+			encountered[tags[i]] = true
+			result = append(result, tags[i])
+		}
+	}
+	return result
 }
 
 func (s *SpecInfoGatherer) addToSpecsCache(key string, value *SpecDetail) {
@@ -145,11 +247,14 @@ func (s *SpecInfoGatherer) addToConceptsCache(key string, value *gauge.Concept) 
 
 func (s *SpecInfoGatherer) deleteFromConceptDictionary(file string) {
 	for _, c := range s.conceptsCache.concepts[file] {
-		delete(s.conceptDictionary.ConceptsMap, c.ConceptStep.Value)
+		if file == s.conceptDictionary.ConceptsMap[c.ConceptStep.Value].FileName {
+			s.conceptDictionary.Remove(c.ConceptStep.Value)
+		}
 	}
 }
-func (s *SpecInfoGatherer) addToStepsCache(fileName string, allSteps []*gauge.StepValue) {
-	s.stepsCache.stepValues[fileName] = allSteps
+
+func (s *SpecInfoGatherer) addToStepsCache(fileName string, allSteps []*gauge.Step) {
+	s.stepsCache.steps[fileName] = allSteps
 }
 
 func (s *SpecInfoGatherer) getParsedSpecs(specFiles []string) []*SpecDetail {
@@ -165,9 +270,8 @@ func (s *SpecInfoGatherer) getParsedSpecs(specFiles []string) []*SpecDetail {
 	for _, v := range parseResults {
 		_, ok := specs[v.FileName]
 		if !ok {
-			specs[v.FileName] = &SpecDetail{Spec: &gauge.Specification{FileName: v.FileName}}
+			specs[v.FileName] = &SpecDetail{Spec: &gauge.Specification{FileName: v.FileName}, Errs: v.ParseErrors}
 		}
-		specs[v.FileName].Errs = append(v.CriticalErrors, v.ParseErrors...)
 	}
 	details := make([]*SpecDetail, 0)
 	for _, d := range specs {
@@ -178,24 +282,28 @@ func (s *SpecInfoGatherer) getParsedSpecs(specFiles []string) []*SpecDetail {
 
 func (s *SpecInfoGatherer) getParsedConcepts() map[string]*gauge.Concept {
 	var result *parser.ParseResult
-	s.conceptDictionary, result = parser.CreateConceptsDictionary()
+	var err error
+	s.conceptDictionary, result, err = parser.CreateConceptsDictionary()
+	if err != nil {
+		logger.Fatalf(true, "Unable to parse concepts : %s", err.Error())
+	}
 	handleParseFailures([]*parser.ParseResult{result})
 	return s.conceptDictionary.ConceptsMap
 }
 
-func (s *SpecInfoGatherer) getStepsFromCachedSpecs() map[string][]*gauge.StepValue {
+func (s *SpecInfoGatherer) getStepsFromCachedSpecs() map[string][]*gauge.Step {
 	s.specsCache.mutex.RLock()
 	defer s.specsCache.mutex.RUnlock()
 
-	var stepsFromSpecsMap = make(map[string][]*gauge.StepValue, 0)
+	var stepsFromSpecsMap = make(map[string][]*gauge.Step)
 	for _, detail := range s.specsCache.specDetails {
 		stepsFromSpecsMap[detail.Spec.FileName] = append(stepsFromSpecsMap[detail.Spec.FileName], getStepsFromSpec(detail.Spec)...)
 	}
 	return stepsFromSpecsMap
 }
 
-func (s *SpecInfoGatherer) getStepsFromCachedConcepts() map[string][]*gauge.StepValue {
-	var stepsFromConceptMap = make(map[string][]*gauge.StepValue, 0)
+func (s *SpecInfoGatherer) getStepsFromCachedConcepts() map[string][]*gauge.Step {
+	var stepsFromConceptMap = make(map[string][]*gauge.Step)
 	s.conceptsCache.mutex.RLock()
 	defer s.conceptsCache.mutex.RUnlock()
 	for _, conceptList := range s.conceptsCache.concepts {
@@ -207,62 +315,77 @@ func (s *SpecInfoGatherer) getStepsFromCachedConcepts() map[string][]*gauge.Step
 }
 
 func (s *SpecInfoGatherer) OnSpecFileModify(file string) {
-	logger.APILog.Info("Spec file added / modified: %s", file)
+	logger.Infof(false, "Spec file added / modified: %s", file)
 
 	details := s.getParsedSpecs([]string{file})
 	s.specsCache.mutex.Lock()
 	s.addToSpecsCache(file, details[0])
 	s.specsCache.mutex.Unlock()
 
-	var steps []*gauge.StepValue
-	for _, step := range getStepsFromSpec(details[0].Spec) {
-		con := s.conceptDictionary.Search(step.StepValue)
-		if con == nil {
-			steps = append(steps, step)
-		}
-	}
+	var steps []*gauge.Step
+	steps = append(steps, getStepsFromSpec(details[0].Spec)...)
 	s.stepsCache.mutex.Lock()
 	s.addToStepsCache(file, steps)
 	s.stepsCache.mutex.Unlock()
+
+	s.paramsCache.mutex.Lock()
+	s.updateParamCacheFromSpecs(file, details[0])
+	s.paramsCache.mutex.Unlock()
+
+	s.tagsCache.mutex.Lock()
+	s.updateTagsCacheFromSpecs(file, details[0])
+	s.tagsCache.mutex.Unlock()
 }
 
 func (s *SpecInfoGatherer) OnConceptFileModify(file string) {
 	s.conceptsCache.mutex.Lock()
 	defer s.conceptsCache.mutex.Unlock()
 
-	logger.APILog.Info("Concept file added / modified: %s", file)
+	logger.Infof(false, "Concept file added / modified: %s", file)
 	s.deleteFromConceptDictionary(file)
-	concepts, parseErrors := parser.AddConcepts(file, s.conceptDictionary)
+	concepts, parseErrors, err := parser.AddConcepts([]string{file}, s.conceptDictionary)
+	if err != nil {
+		logger.Fatalf(true, "Unable to update concepts : %s", err.Error())
+	}
 	if len(parseErrors) > 0 {
-		for _, err := range parseErrors {
-			logger.APILog.Error("Error parsing concepts: ", err)
-		}
-		return
+		res := &parser.ParseResult{}
+		res.ParseErrors = append(res.ParseErrors, parseErrors...)
+		res.Ok = false
+		handleParseFailures([]*parser.ParseResult{res})
 	}
 	s.conceptsCache.concepts[file] = make([]*gauge.Concept, 0)
+	var stepsFromConcept []*gauge.Step
 	for _, concept := range concepts {
 		c := gauge.Concept{ConceptStep: concept, FileName: file}
 		s.addToConceptsCache(file, &c)
-		stepsFromConcept := getStepsFromConcept(&c)
-		s.addToStepsCache(file, stepsFromConcept)
+		stepsFromConcept = append(stepsFromConcept, getStepsFromConcept(&c)...)
 	}
+	s.addToStepsCache(file, stepsFromConcept)
+	s.paramsCache.mutex.Lock()
+	defer s.paramsCache.mutex.Unlock()
+	s.updateParamsCacheFromConcepts(file, s.conceptsCache.concepts[file])
 }
 
 func (s *SpecInfoGatherer) onSpecFileRemove(file string) {
-	logger.APILog.Info("Spec file removed: %s", file)
+	logger.Infof(false, "Spec file removed: %s", file)
 	s.specsCache.mutex.Lock()
 	defer s.specsCache.mutex.Unlock()
 	delete(s.specsCache.specDetails, file)
+	s.removeStepsFromCache(file)
+}
+func (s *SpecInfoGatherer) removeStepsFromCache(fileName string) {
+	s.stepsCache.mutex.Lock()
+	defer s.stepsCache.mutex.Unlock()
+	delete(s.stepsCache.steps, fileName)
 }
 
 func (s *SpecInfoGatherer) onConceptFileRemove(file string) {
-	logger.APILog.Info("Concept file removed: %s", file)
+	logger.Infof(false, "Concept file removed: %s", file)
 	s.conceptsCache.mutex.Lock()
 	defer s.conceptsCache.mutex.Unlock()
-	for _, c := range s.conceptsCache.concepts[file] {
-		delete(s.conceptDictionary.ConceptsMap, c.ConceptStep.Value)
-	}
+	s.deleteFromConceptDictionary(file)
 	delete(s.conceptsCache.concepts, file)
+	s.removeStepsFromCache(file)
 }
 
 func (s *SpecInfoGatherer) onFileAdd(watcher *fsnotify.Watcher, file string) {
@@ -299,7 +422,7 @@ func (s *SpecInfoGatherer) handleEvent(event fsnotify.Event, watcher *fsnotify.W
 
 	file, err := filepath.Abs(event.Name)
 	if err != nil {
-		logger.APILog.Error("Failed to get abs file path for %s: %s", event.Name, err)
+		logger.Errorf(false, "Failed to get abs file path for %s: %s", event.Name, err)
 		return
 	}
 	if util.IsSpec(file) || util.IsConcept(file) || util.IsDir(file) {
@@ -321,7 +444,7 @@ func (s *SpecInfoGatherer) watchForFileChanges() {
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		logger.APILog.Error("Error creating fileWatcher: %s", err)
+		logger.Errorf(false, "Error creating fileWatcher: %s", err)
 	}
 	defer watcher.Close()
 
@@ -332,7 +455,7 @@ func (s *SpecInfoGatherer) watchForFileChanges() {
 			case event := <-watcher.Events:
 				s.handleEvent(event, watcher)
 			case err := <-watcher.Errors:
-				logger.APILog.Error("Error event while watching specs", err)
+				logger.Errorf(false, "Error event while watching specs %s", err)
 			}
 		}
 	}()
@@ -356,7 +479,7 @@ func (s *SpecInfoGatherer) watchForFileChanges() {
 // GetAvailableSpecs returns the list of all the specs in the gauge project
 func (s *SpecInfoGatherer) GetAvailableSpecDetails(specs []string) []*SpecDetail {
 	if len(specs) < 1 {
-		specs = []string{common.SpecsDirectoryName}
+		specs = util.GetSpecDirs()
 	}
 	specFiles := getSpecFiles(specs)
 	s.specsCache.mutex.RLock()
@@ -370,19 +493,67 @@ func (s *SpecInfoGatherer) GetAvailableSpecDetails(specs []string) []*SpecDetail
 	return details
 }
 
-// GetAvailableSteps returns the list of all the steps in the gauge project
-func (s *SpecInfoGatherer) GetAvailableSteps() []*gauge.StepValue {
-	var steps []*gauge.StepValue
+func (s *SpecInfoGatherer) GetSpecDirs() []string {
+	return s.SpecDirs
+}
+
+// Steps returns the list of all the steps in the gauge project. Duplicate steps are filtered
+func (s *SpecInfoGatherer) Steps(filterConcepts bool) []*gauge.Step {
 	s.stepsCache.mutex.RLock()
 	defer s.stepsCache.mutex.RUnlock()
-	for _, stepValues := range s.stepsCache.stepValues {
-		steps = append(steps, stepValues...)
+	filteredSteps := make(map[string]*gauge.Step)
+	for _, steps := range s.stepsCache.steps {
+		for _, s := range steps {
+			if !filterConcepts || !s.IsConcept {
+				filteredSteps[s.Value] = s
+			}
+		}
+	}
+	var steps []*gauge.Step
+	for _, sv := range filteredSteps {
+		steps = append(steps, sv)
 	}
 	return steps
 }
 
-// GetConceptInfos returns an array containing information about all the concepts present in the Gauge project
-func (s *SpecInfoGatherer) GetConceptInfos() []*gauge_messages.ConceptInfo {
+// Steps returns the list of all the steps in the gauge project including duplicate steps
+func (s *SpecInfoGatherer) AllSteps(filterConcepts bool) []*gauge.Step {
+	s.stepsCache.mutex.RLock()
+	defer s.stepsCache.mutex.RUnlock()
+	var allSteps []*gauge.Step
+	for _, steps := range s.stepsCache.steps {
+		if filterConcepts {
+			for _, s := range steps {
+				if !s.IsConcept {
+					allSteps = append(allSteps, s)
+				}
+			}
+		} else {
+			allSteps = append(allSteps, steps...)
+		}
+	}
+	return allSteps
+}
+
+// Steps returns the list of all the steps in the gauge project
+func (s *SpecInfoGatherer) Params(filePath string, argType gauge.ArgType) []gauge.StepArg {
+	s.paramsCache.mutex.RLock()
+	defer s.paramsCache.mutex.RUnlock()
+	var params []gauge.StepArg
+	if argType == gauge.Static {
+		for _, param := range s.paramsCache.staticParams[filePath] {
+			params = append(params, param)
+		}
+	} else {
+		for _, param := range s.paramsCache.dynamicParams[filePath] {
+			params = append(params, param)
+		}
+	}
+	return params
+}
+
+// Concepts returns an array containing information about all the concepts present in the Gauge project
+func (s *SpecInfoGatherer) Concepts() []*gauge_messages.ConceptInfo {
 	var conceptInfos []*gauge_messages.ConceptInfo
 	s.conceptsCache.mutex.RLock()
 	defer s.conceptsCache.mutex.RUnlock()
@@ -395,36 +566,38 @@ func (s *SpecInfoGatherer) GetConceptInfos() []*gauge_messages.ConceptInfo {
 	return conceptInfos
 }
 
-func getStepsFromSpec(spec *gauge.Specification) []*gauge.StepValue {
-	stepValues := getParsedStepValues(spec.Contexts)
+func (s *SpecInfoGatherer) Tags() []string {
+	s.tagsCache.mutex.RLock()
+	defer s.tagsCache.mutex.RUnlock()
+	var allTags []string
+	for _, tags := range s.tagsCache.tags {
+		allTags = append(allTags, tags...)
+	}
+	return removeDuplicateTags(allTags)
+}
+
+// SearchConceptDictionary searches for a concept in concept dictionary
+func (s *SpecInfoGatherer) SearchConceptDictionary(stepValue string) *gauge.Concept {
+	return s.conceptDictionary.Search(stepValue)
+}
+
+func getStepsFromSpec(spec *gauge.Specification) []*gauge.Step {
+	steps := spec.Contexts
 	for _, scenario := range spec.Scenarios {
-		stepValues = append(stepValues, getParsedStepValues(scenario.Steps)...)
+		steps = append(steps, scenario.Steps...)
 	}
-	return stepValues
+	steps = append(steps, spec.TearDownSteps...)
+	return steps
 }
 
-func getStepsFromConcept(concept *gauge.Concept) []*gauge.StepValue {
-	return getParsedStepValues(concept.ConceptStep.ConceptSteps)
-}
-
-func getParsedStepValues(steps []*gauge.Step) []*gauge.StepValue {
-	var stepValues []*gauge.StepValue
-	for _, step := range steps {
-		if !step.IsConcept {
-			stepValue := parser.CreateStepValue(step)
-			stepValues = append(stepValues, &stepValue)
-		}
-	}
-	return stepValues
+func getStepsFromConcept(concept *gauge.Concept) []*gauge.Step {
+	return concept.ConceptStep.ConceptSteps
 }
 
 func handleParseFailures(parseResults []*parser.ParseResult) {
 	for _, result := range parseResults {
 		if !result.Ok {
-			logger.APILog.Error("Spec Parse failure: %s", result.Errors())
-			if len(result.CriticalErrors) > 0 {
-				os.Exit(1)
-			}
+			logger.Errorf(false, "Parse failure: %s", result.Errors())
 		}
 	}
 }
@@ -432,15 +605,18 @@ func handleParseFailures(parseResults []*parser.ParseResult) {
 func addDirToFileWatcher(watcher *fsnotify.Watcher, dir string) {
 	err := watcher.Add(dir)
 	if err != nil {
-		logger.APILog.Error("Unable to add directory %v to file watcher: %s", dir, err)
+		logger.Errorf(false, "Unable to add directory %v to file watcher: %s", dir, err.Error())
 	} else {
-		logger.APILog.Info("Watching directory: %s", dir)
+		logger.Infof(false, "Watching directory: %s", dir)
 		files, _ := ioutil.ReadDir(dir)
-		logger.APILog.Debug("Found %d files", len(files))
+		logger.Debugf(false, "Found %d files", len(files))
 	}
 }
 
 func removeWatcherOn(watcher *fsnotify.Watcher, path string) {
-	logger.APILog.Info("Removing watcher on : %s", path)
-	watcher.Remove(path)
+	logger.Infof(false, "Removing watcher on : %s", path)
+	err := watcher.Remove(path)
+	if err != nil {
+		logger.Errorf(false, "Unable to remove watcher on: %s. %s", path, err.Error())
+	}
 }

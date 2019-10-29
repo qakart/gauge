@@ -1,50 +1,63 @@
 ![Gauge Logo](Gauge-Logo.png)
 
-# Welcome to Gauge
 
-[![Join the chat at https://gitter.im/getgauge/gauge](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/getgauge/chat?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
-[ ![Download Nightly](https://api.bintray.com/packages/gauge/Gauge/Nightly/images/download.svg) ](https://bintray.com/gauge/Gauge/Nightly/_latestVersion)
-[![Build Status](https://travis-ci.org/getgauge/gauge.svg?branch=master)](https://travis-ci.org/getgauge/gauge)
+[![Actions Status](https://github.com/getgauge/gauge/workflows/build/badge.svg)](https://github.com/getgauge/gauge/actions)
+
+[![Ask at StackOverflow](https://img.shields.io/badge/StackOverflow-getgauge-F5C10E.svg?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAMAAAAoLQ9TAAAAnFBMVEUAAADs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PHs8PG3iEVjAAAAM3RSTlMAAQMGBwkLDA0QExweKS4wMzc4PkdJT1JdY2dvc3WDjpiam6avtcfMz9ng4ubp7fHz9/tqGqSaAAAAfUlEQVQYGV3BBw6CQABFwb/YUOy9IIpgb8i7/92ErBLCjKzGKzAqa185tVTmhCR9/ZmoJy1gY2QN4DIy3oNjXVY3gvu0HfN09dPZwXsdRsqNb8GkY5rblE9NuRWZNF7O9r4sx5sfEjKeJJDlDv2zAwJREAhEQSBQCYgKUfEFJ7oYF2usUEAAAAAASUVORK5CYII=)](https://stackoverflow.com/questions/ask?tags=getgauge)
+[![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-v1.4%20adopted-ff69b4.svg)](CODE_OF_CONDUCT.md)
 
 # Welcome to Gauge
 
 Gauge is a light weight cross-platform test automation tool. It provides the ability to author test cases in the business language.
 
 ## Get Started
-Read more about [Why Gauge](https://docs.getgauge.io/longstart.html#why-gauge) can be used, its [terminologies](https://docs.getgauge.io/longstart.html#gauge-terminologies) and [**get started...**](https://getgauge.io/get-started.html)
-
-## Looking for examples?
-Get started by [example projects](https://docs.getgauge.io/examples.html)
-
-## Help
-Refer our [Troubleshooting](https://docs.getgauge.io/troubleshooting.html) guide.
+Read more about [Why Gauge](https://blog.getgauge.io/why-we-built-gauge-6e31bb4848cd) can be used, its [terminologies](https://docs.gauge.org/latest/writing-specifications.html) and [**get started...**](https://docs.gauge.org/getting_started/installing-gauge.html)
 
 ## Find out more
 
-| **[User Docs][userdocs]**     | **[Setup Guide][setup]**     | **[Roadmap][roadmap]**           | **[Contributing][contributing]**           |
+| **[User Docs][userdocs]**     | **[Setup Guide][get-started]**     | **[Examples][examples]**           | **[Contributing][contributing]**           |
 |:-------------------------------------:|:-------------------------------:|:-----------------------------------:|:---------------------------------------------:|
-| [![i1][userdocs-image]][userdocs]<br>Learn more about using Gauge | [![i2][setup-image]][setup]<br> Getting started with Gauge | [![i3][roadmap-image]][roadmap]<br>Roadmap of Gauge Project | [![i4][contributing-image]][contributing]<br>How can you contribute to Gauge? |
+| [![i1][userdocs-image]][userdocs]<br>Learn more about using Gauge | [![i2][getstarted-image]][get-started]<br> Getting started with Gauge | [![i3][examples-image]][examples]<br>Some Gauge Examples | [![i4][contributing-image]][contributing]<br>How can you contribute to Gauge? |
 
+[userdocs-image]:https://d3i6fms1cm1j0i.cloudfront.net/github/images/techdocs.png
+[getstarted-image]:https://d3i6fms1cm1j0i.cloudfront.net/github/images/setup.png
+[examples-image]:https://d3i6fms1cm1j0i.cloudfront.net/github/images/roadmap.png
+[contributing-image]:https://d3i6fms1cm1j0i.cloudfront.net/github/images/contributing.png
+
+[userdocs]:https://docs.gauge.org/latest
+[get-started]:https://github.com/getgauge/gauge/wiki/Setup
+[examples]:https://getgauge-examples.github.io/
+[contributing]:CONTRIBUTING.md
 
 ## Questions or need help?
 
-Check out the **[Talk to us](http://github.com/getgauge/gauge/wiki/Talk-to-us)** page on our wiki.
+### Troubleshooting
+Context specific **Troubleshooting** guide is available in relevant pages of the [Gauge Documentation](https://docs.gauge.org/latest).
 
-[userdocs-image]:https://d3i6fms1cm1j0i.cloudfront.net/github/images/techdocs.png
-[setup-image]:https://d3i6fms1cm1j0i.cloudfront.net/github/images/setup.png
-[roadmap-image]:https://d3i6fms1cm1j0i.cloudfront.net/github/images/roadmap.png
-[contributing-image]:https://d3i6fms1cm1j0i.cloudfront.net/github/images/contributing.png
+### Talk to us
 
-[userdocs]:http://docs.getgauge.io
-[setup]:https://github.com/getgauge/gauge/wiki/Setting-up-Gauge
-[roadmap]:http://github.com/getgauge/gauge/wiki/Product-Roadmap
-[contributing]:https://github.com/getgauge/gauge/wiki/Contributing
+Please see below for the best place to ask a query:
 
-## Add your Badge!
-Copy the text below and add it to the README.md of your project using Gauge.
+- How do I? -- [Stack Overflow](https://stackoverflow.com/questions/ask?tags=getgauge)
+- I got this error, why? -- [Stack Overflow](https://stackoverflow.com/questions/ask?tags=getgauge)
+- I got this error and I'm sure it's a bug -- file an [issue](https://github.com/getgauge/gauge/issues)
+- I have an idea/request -- file an [issue](https://github.com/getgauge/gauge/issues)
+- Why do you? -- [Google Groups](https://groups.google.com/forum/#!forum/getgauge)
+- When will you? -- [Google Groups](https://groups.google.com/forum/#!forum/getgauge)
+
+### Other projects
+
+Also maintained by Gauge
+
+- [Taiko](https://github.com/getgauge/taiko) Headless web browser automation.
+
+## Add Gauge Badge to your project!
+Copy the text below and add it to the README.md of your project using Gauge, and show your support. It looks like this:
+
+[![Gauge Badge](https://gauge.org/Gauge_Badge.svg)](https://gauge.org)
 
 ```
-[![Gauge Badge](http://getgauge.io/Gauge_Badge.svg)](http://getgauge.io)
+[![Gauge Badge](https://gauge.org/Gauge_Badge.svg)](https://gauge.org)
 ```
 
 ## License
@@ -52,10 +65,6 @@ Copy the text below and add it to the README.md of your project using Gauge.
 ![GNU Public License version 3.0](http://www.gnu.org/graphics/gplv3-127x51.png)
 Gauge is released under [GNU Public License version 3.0](http://www.gnu.org/licenses/gpl-3.0.txt)
 
-## Contributing
-
-Please read the [guide](CONTRIBUTING.md) on contributing to Gauge.
-
 ## Copyright
 
-Copyright 2017 ThoughtWorks, Inc.
+Copyright 2018 ThoughtWorks, Inc.

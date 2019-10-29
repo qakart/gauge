@@ -25,10 +25,11 @@ import (
 )
 
 // CurrentGaugeVersion represents the current version of Gauge
-var CurrentGaugeVersion = &Version{0, 8, 5}
+var CurrentGaugeVersion = &Version{1, 0, 7}
 
 // BuildMetadata represents build information of current release (e.g, nightly build information)
 var BuildMetadata = ""
+var CommitHash = ""
 
 type Version struct {
 	Major int
@@ -97,10 +98,7 @@ func CompareVersions(first *Version, second *Version, compareFunc func(int, int)
 		if compareFunc(first.Minor, second.Minor) {
 			return true
 		} else if IsEqual(first.Minor, second.Minor) {
-			if compareFunc(first.Patch, second.Patch) {
-				return true
-			}
-			return false
+			return compareFunc(first.Patch, second.Patch)
 		}
 	}
 	return false

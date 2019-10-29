@@ -7,33 +7,56 @@
 ; HM NIS Edit Wizard helper defines
 !define PRODUCT_NAME "Gauge"
 !define PRODUCT_PUBLISHER "ThoughtWorks Inc."
-!define PRODUCT_WEB_SITE "http://getgauge.io"
+!define PRODUCT_WEB_SITE "https://gauge.org"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\gauge.exe"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 !define PRODUCT_UNINST_ROOT_KEY "HKLM"
 !define MUI_FINISHPAGE_LINK "Click here to read the Gauge Reference Documentation"
-!define MUI_FINISHPAGE_LINK_LOCATION "https://docs.getgauge.io"
+!define MUI_FINISHPAGE_LINK_LOCATION "https://docs.gauge.org"
 !define MUI_FINISHPAGE_NOAUTOCLOSE
-!define MUI_COMPONENTSPAGE_TEXT_COMPLIST "Additional plugins can be installed using the command 'gauge --install <plugin>'"
-
+!define MUI_COMPONENTSPAGE_TEXT_COMPLIST "Additional plugins can be installed using the command 'gauge install <plugin>'"
+!define TELEMETRY_PAGE_TITLE "Gauge Telemetry"
+!define TELEMETRY_PAGE_DESCRIPTION "We are constantly looking to make Gauge better, and report usage statistics anonymously over time."
+!define TELEMETRY_PAGE_ACTION_DESCRIPTION "If you do not want to participate please uncheck the option below."
 ; MUI 1.67 compatible ------
 !include "MUI.nsh"
 !include "MUI2.nsh"
-!include "MUI_EXTRAPAGES.nsh"
 !include "EnvVarUpdate.nsh"
 !include "x64.nsh"
 !include "winmessages.nsh"
 !include "FileFunc.nsh" ;For GetOptions
 !include "WordFunc.nsh"
+!include "nsDialogs.nsh"
 
 !define Explode "!insertmacro Explode"
 
 !macro  Explode Length  Separator   String
-    Push    `${Separator}`
-    Push    `${String}`
-    Call    Explode
-    Pop     `${Length}`
+  Push    `${Separator}`
+  Push    `${String}`
+  Call    Explode
+  Pop     `${Length}`
 !macroend
+
+var TelemetryEnabled
+var TelemetryEnabledDialog
+Function TelemetryEnablePage
+  !insertmacro MUI_HEADER_TEXT "${TELEMETRY_PAGE_TITLE}" ""
+  nsDialogs::Create 1018
+  Pop $TelemetryEnabledDialog
+  ${If} $TelemetryEnabledDialog == error
+    abort
+  ${EndIf}
+  ${NSD_CreateLabel} 20u 0 250u 30u "${TELEMETRY_PAGE_DESCRIPTION}"
+  ${NSD_CreateLabel} 20u 30u 250u 30u "${TELEMETRY_PAGE_ACTION_DESCRIPTION}"
+  ${NSD_CreateCheckbox} 20u 60u 100% 10u "&Enable Telemetry"
+  Pop $TelemetryEnabled
+  ${NSD_Check} $TelemetryEnabled
+  nsDialogs::Show
+FunctionEnd
+
+Function TelemetryPageLeave
+    ${NSD_GetState} $TelemetryEnabled $R8
+FunctionEnd
 
 ; MUI Settings
 !define MUI_ABORTWARNING
@@ -46,12 +69,11 @@
 !insertmacro MUI_PAGE_LICENSE "gpl.txt"
 ; Plugin options page
 !insertmacro MUI_PAGE_COMPONENTS
+Page Custom TelemetryEnablePage TelemetryPageLeave
 ; Directory page
 !insertmacro MUI_PAGE_DIRECTORY
 ; Instfiles page
 !insertmacro MUI_PAGE_INSTFILES
-;Readme page
-!insertmacro MUI_PAGE_README "readme.txt"
 ; Finish page
 !insertmacro MUI_PAGE_FINISH
 
@@ -69,23 +91,14 @@ BrandingText "${PRODUCT_NAME} ${PRODUCT_VERSION}  |  ${PRODUCT_PUBLISHER}"
 
 Name "${PRODUCT_NAME} ${PRODUCT_VERSION}"
 OutFile "${OUTPUT_FILE_NAME}"
-InstallDir "$PROGRAMFILES\Gauge"
-Var ConfigDir
-InstallDirRegKey HKLM "${PRODUCT_DIR_REGKEY}" ""
 ShowUnInstDetails show
 
 Section "Gauge" SEC_GAUGE
-  IfFileExists "$CONFIGDIR\gauge.properties" 0 +3
   CreateDirectory $%temp%\Gauge
-  CopyFiles "$CONFIGDIR\gauge.properties" "$%temp%\Gauge\gauge.properties.bak"
   SectionIn RO
   SetOutPath "$INSTDIR\bin"
   SetOverwrite on
-  File /r "${GAUGE_DISTRIBUTABLES_DIR}\bin\*"
-  SectionIn RO
-  SetOutPath "$CONFIGDIR"
-  SetOverwrite on
-  File /r "${GAUGE_DISTRIBUTABLES_DIR}\config\*"
+  File /r "${GAUGE_DISTRIBUTABLES_DIR}\*"
 SectionEnd
 
 SectionGroup /e "Language Plugins" SEC_LANGUAGES
@@ -94,6 +107,12 @@ SectionGroup /e "Language Plugins" SEC_LANGUAGES
   Section /o "C#" SEC_CSHARP
   SectionEnd
   Section /o "Ruby" SEC_RUBY
+  SectionEnd
+  Section /o "JavaScript" SEC_JAVASCRIPT
+  SectionEnd
+  Section /o "Python" SEC_PYTHON
+  SectionEnd
+  Section /o "Dotnet" SEC_DOTNET
   SectionEnd
 SectionGroupEnd
 
@@ -114,6 +133,9 @@ SectionGroupEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_JAVA} "Java language runner, enables writing implementations using Java."
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_CSHARP} "C# language runner, enables writing implementations using C#."
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_RUBY} "Ruby language runner, enables writing implementations using Ruby."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_JAVASCRIPT} "JavaScript language runner, enables writing implementations using JavaScript."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_PYTHON} "Python language runner, enables writing implementations using Python."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_DOTNET} "Dotnet core language runner, enables writing implementations using Dotnet core."
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_REPORTS} "Check to install reporting plugins. HTML report plugin is installed by default."
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_HTML} "Generates HTML report of Gauge spec run."
   !insertmacro MUI_DESCRIPTION_TEXT ${SEC_XML} "Generates JUnit style XML report of Gauge spec run."
@@ -121,38 +143,13 @@ SectionGroupEnd
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 function .onInit
-  ${If} ${RunningX64}
-    SetRegView 64
-    StrCpy $INSTDIR "$PROGRAMFILES64\Gauge"
-  ${EndIf}
-  StrCpy $CONFIGDIR "$APPDATA\Gauge\config"
-  ;See if PLUGINS to install are specified via cmd line arg
-  ;Only if it is silent install
-  ${If} ${Silent}
-    ${GetParameters} $R0
-    ${GetOptions} $R0 "/PLUGINS" $0
-    ${IfNot} ${Errors}
-      ${Explode}  $1  "," $0
-      ${For} $2 1 $1
-        Pop $3
-        ${StrFilter} $3 "-" "" "" $3 ; lowercase
-        ${If} '$3' == 'ruby'
-          !insertmacro SelectSection ${SEC_RUBY}
-        ${EndIf}
-        ${If} '$3' == 'java'
-          !insertmacro SelectSection ${SEC_JAVA}
-        ${EndIf}
-        ${If} '$3' == 'csharp'
-          !insertmacro SelectSection ${SEC_CSHARP}
-        ${EndIf}
-        ${If} '$3' == 'xml-report'
-          !insertmacro SelectSection ${SEC_XML}
-        ${EndIf}
-        ${If} '$3' == 'spectacle'
-          !insertmacro SelectSection ${SEC_SPECTACLE}
-        ${EndIf}
-      ${Next}
-    ${EndIF}
+  ${If} $INSTDIR == ""
+    ${If} ${RunningX64}
+      SetRegView 64
+      StrCpy $INSTDIR "$PROGRAMFILES64\Gauge"
+    ${Else}
+      StrCpy $INSTDIR "$PROGRAMFILES\Gauge"
+    ${EndIf}
   ${EndIf}
 functionEnd
 
@@ -172,50 +169,72 @@ Section -Post
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "URLInfoAbout" "${PRODUCT_WEB_SITE}"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
   ${EnvVarUpdate} $0 "PATH" "A" "HKLM" "$INSTDIR\bin"
-  WriteRegExpandStr ${env_hklm} GAUGE_ROOT $CONFIGDIR
   SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
-  ExecWait '"$INSTDIR\set_timestamp.bat" "$CONFIGDIR"'
-  IfFileExists "$%temp%\Gauge\gauge.properties.bak" 0 +3
-  CopyFiles "$%temp%\Gauge\gauge.properties.bak" "$CONFIGDIR"
   RMDir /r /REBOOTOK "$%temp%\Gauge"
+
+  ${If} $R8 == 0
+    DetailPrint "Turning off Telemetry"
+    nsExec::ExecToLog 'gauge telemetry off'
+  ${Else}
+    DetailPrint "Turning on Telemetry"
+    nsExec::ExecToLog 'gauge telemetry on'
+  ${EndIf}
 
   Dialer::GetConnectedState
   Pop $R0
 
   ${If} $R0 == 'online'
-    DetailPrint "Installing plugin : html-report"
-    nsExec::ExecToLog 'gauge --install html-report'
-
     SectionGetFlags ${SEC_JAVA} $R0
     SectionGetFlags ${SEC_CSHARP} $R1
     SectionGetFlags ${SEC_RUBY} $R2
-    SectionGetFlags ${SEC_XML} $R3
-    SectionGetFlags ${SEC_SPECTACLE} $R4
+    SectionGetFlags ${SEC_JAVASCRIPT} $R3
+    SectionGetFlags ${SEC_PYTHON} $R4
+    SectionGetFlags ${SEC_DOTNET} $R5
+    SectionGetFlags ${SEC_XML} $R6
+    SectionGetFlags ${SEC_SPECTACLE} $R7
 
     ${If} $R0 == 1
       DetailPrint "Installing plugin : java"
-      nsExec::ExecToLog 'gauge --install java'
+      nsExec::ExecToLog 'gauge install java'
     ${EndIf}
 
     ${If} $R1 == 1
       DetailPrint "Installing plugin : csharp"
-      nsExec::ExecToLog 'gauge --install csharp'
+      nsExec::ExecToLog 'gauge install csharp'
     ${EndIf}
 
     ${If} $R2 == 1
       DetailPrint "Installing plugin : ruby"
-      nsExec::ExecToLog 'gauge --install ruby'
+      nsExec::ExecToLog 'gauge install ruby'
     ${EndIf}
 
     ${If} $R3 == 1
-      DetailPrint "Installing plugin : xml-report"
-      nsExec::ExecToLog 'gauge --install xml-report'
+      DetailPrint "Installing plugin : javascript"
+      nsExec::ExecToLog 'gauge install js'
     ${EndIf}
 
     ${If} $R4 == 1
-      DetailPrint "Installing plugin : spectacle"
-      nsExec::ExecToLog 'gauge --install spectacle'
+      DetailPrint "Installing plugin : python"
+      nsExec::ExecToLog 'gauge install python'
     ${EndIf}
+
+    ${If} $R5 == 1
+      DetailPrint "Installing plugin : dotnet"
+      nsExec::ExecToLog 'gauge install dotnet'
+    ${EndIf}
+
+    ${If} $R6 == 1
+      DetailPrint "Installing plugin : xml-report"
+      nsExec::ExecToLog 'gauge install xml-report'
+    ${EndIf}
+
+    ${If} $R7 == 1
+      DetailPrint "Installing plugin : spectacle"
+      nsExec::ExecToLog 'gauge install spectacle'
+    ${EndIf}
+
+    DetailPrint "Installing plugin : html-report"
+    nsExec::ExecToLog 'gauge install html-report'
   ${Else}
     DetailPrint "[WARNING] Internet connection unavailable. Skipping plugins installation"
   ${EndIf}
@@ -237,7 +256,6 @@ Section Uninstall
   Delete "$INSTDIR\uninst.exe"
   Delete "$INSTDIR\plugin-install.bat"
   RMDir /r "$INSTDIR\bin"
-  RMDir /r "$CONFIGPREFIX"
   Delete "$SMPROGRAMS\Gauge\Uninstall.lnk"
   DeleteRegKey ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}"
   DeleteRegKey HKLM "${PRODUCT_DIR_REGKEY}"

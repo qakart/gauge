@@ -39,7 +39,7 @@ func (s *MySuite) TestRefactoringOfStepsWithNoArgs(c *C) {
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading", LineNo: 2},
 		&parser.Token{Kind: gauge.StepKind, Value: oldStep, LineNo: 3},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	agent, errs := getRefactorAgent(oldStep, newStep, nil)
 	specs := append(make([]*gauge.Specification, 0), spec)
 	agent.rephraseInSpecsAndConcepts(&specs, gauge.NewConceptDictionary())
@@ -62,7 +62,7 @@ func (s *MySuite) TestRefactoringOfStepsWithNoArgsAndWithMoreThanOneScenario(c *
 		&parser.Token{Kind: gauge.StepKind, Value: unchanged, LineNo: 30},
 		&parser.Token{Kind: gauge.StepKind, Value: oldStep, LineNo: 50},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	agent, errs := getRefactorAgent(oldStep, newStep, nil)
 	specs := append(make([]*gauge.Specification, 0), spec)
 	agent.rephraseInSpecsAndConcepts(&specs, gauge.NewConceptDictionary())
@@ -86,20 +86,20 @@ func (s *MySuite) TestRefactoringOfStepsWithNoArgsAndWithMoreThanOneSpec(c *C) {
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading", LineNo: 2},
 		&parser.Token{Kind: gauge.StepKind, Value: oldStep, LineNo: 3},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	tokens = []*parser.Token{
 		&parser.Token{Kind: gauge.SpecKind, Value: "Spec Heading", LineNo: 10},
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading", LineNo: 20},
 		&parser.Token{Kind: gauge.StepKind, Value: oldStep, LineNo: 30},
 	}
-	spec1, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec1, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	specs := append(make([]*gauge.Specification, 0), spec)
 	specs = append(specs, spec1)
 	agent, errs := getRefactorAgent(oldStep, newStep, nil)
 	specRefactored, _ := agent.rephraseInSpecsAndConcepts(&specs, gauge.NewConceptDictionary())
 
-	for _, isRefactored := range specRefactored {
-		c.Assert(true, Equals, isRefactored)
+	for _, diffs := range specRefactored {
+		c.Assert(1, Equals, len(diffs))
 	}
 	c.Assert(len(errs), Equals, 0)
 	c.Assert(len(specs[0].Scenarios[0].Steps), Equals, 1)
@@ -117,7 +117,7 @@ func (s *MySuite) TestRefactoringOfStepsWithNoArgsInConceptFiles(c *C) {
 		&parser.Token{Kind: gauge.SpecKind, Value: "Spec Heading", LineNo: 1},
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading 1", LineNo: 20},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	agent, _ := getRefactorAgent(oldStep, newStep, nil)
 	specs := append(make([]*gauge.Specification, 0), spec)
 	dictionary := gauge.NewConceptDictionary()
@@ -141,20 +141,22 @@ func (s *MySuite) TestRefactoringGivesOnlySpecsThatAreRefactored(c *C) {
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading", LineNo: 2},
 		&parser.Token{Kind: gauge.StepKind, Value: oldStep, LineNo: 3},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	tokens = []*parser.Token{
 		&parser.Token{Kind: gauge.SpecKind, Value: "Spec Heading", LineNo: 10},
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading", LineNo: 20},
 		&parser.Token{Kind: gauge.StepKind, Value: newStep, LineNo: 30},
 	}
-	spec1, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec1, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	specs := append(make([]*gauge.Specification, 0), spec)
 	specs = append(specs, spec1)
 	agent, _ := getRefactorAgent(oldStep, newStep, nil)
 	specRefactored, _ := agent.rephraseInSpecsAndConcepts(&specs, gauge.NewConceptDictionary())
 
-	c.Assert(true, Equals, specRefactored[specs[0]])
-	c.Assert(false, Equals, specRefactored[specs[1]])
+	c.Assert(1, Equals, len(specRefactored[specs[0]]))
+	c.Assert(0, Equals, len(specRefactored[specs[1]]))
+	c.Assert(specRefactored[specs[0]][0].OldStep.Value, Equals, " first step")
+	c.Assert(specRefactored[specs[0]][0].NewStep.Value, Equals, "second step")
 }
 
 func (s *MySuite) TestRefactoringGivesOnlyThoseConceptFilesWhichAreRefactored(c *C) {
@@ -165,7 +167,7 @@ func (s *MySuite) TestRefactoringGivesOnlyThoseConceptFilesWhichAreRefactored(c 
 		&parser.Token{Kind: gauge.SpecKind, Value: "Spec Heading", LineNo: 1},
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading 1", LineNo: 20},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	agent, _ := getRefactorAgent(oldStep, newStep, nil)
 	specs := append(make([]*gauge.Specification, 0), spec)
 	dictionary := gauge.NewConceptDictionary()
@@ -179,8 +181,8 @@ func (s *MySuite) TestRefactoringGivesOnlyThoseConceptFilesWhichAreRefactored(c 
 
 	_, filesRefactored := agent.rephraseInSpecsAndConcepts(&specs, dictionary)
 
-	c.Assert(filesRefactored[fileName], Equals, false)
-	c.Assert(filesRefactored["e"+fileName], Equals, true)
+	c.Assert(len(filesRefactored[fileName]), Equals, 0)
+	c.Assert(len(filesRefactored["e"+fileName]), Equals, 1)
 }
 
 func (s *MySuite) TestRenamingWhenNumberOfArgumentsAreSame(c *C) {
@@ -192,7 +194,7 @@ func (s *MySuite) TestRenamingWhenNumberOfArgumentsAreSame(c *C) {
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading 1", LineNo: 2},
 		&parser.Token{Kind: gauge.StepKind, Value: oldStep, LineNo: 3, Args: []string{"name", "address"}},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	agent, _ := getRefactorAgent(oldStep1, newStep, nil)
 	specs := append(make([]*gauge.Specification, 0), spec)
 	dictionary := gauge.NewConceptDictionary()
@@ -211,7 +213,7 @@ func (s *MySuite) TestRenamingWhenArgumentsOrderIsChanged(c *C) {
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading 1", LineNo: 2},
 		&parser.Token{Kind: gauge.StepKind, Value: oldStep, LineNo: 3, Args: []string{"name", "address", "number", "id"}},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	agent, _ := getRefactorAgent(oldStep1, newStep, nil)
 	specs := append(make([]*gauge.Specification, 0), spec)
 	dictionary := gauge.NewConceptDictionary()
@@ -280,7 +282,7 @@ func (s *MySuite) TestRenamingWhenArgumentsIsAddedAtLast(c *C) {
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading 1", LineNo: 2},
 		&parser.Token{Kind: gauge.StepKind, Value: oldStep, LineNo: 3, Args: []string{"name", "address", "number"}},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	agent, _ := getRefactorAgent(oldStep1, newStep, nil)
 	specs := append(make([]*gauge.Specification, 0), spec)
 	dictionary := gauge.NewConceptDictionary()
@@ -302,7 +304,7 @@ func (s *MySuite) TestRenamingWhenArgumentsIsAddedAtFirst(c *C) {
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading 1", LineNo: 2},
 		&parser.Token{Kind: gauge.StepKind, Value: oldStep, LineNo: 3, Args: []string{"name", "address", "number"}},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	agent, _ := getRefactorAgent(oldStep1, newStep, nil)
 	specs := append(make([]*gauge.Specification, 0), spec)
 	dictionary := gauge.NewConceptDictionary()
@@ -324,7 +326,7 @@ func (s *MySuite) TestRenamingWhenArgumentsIsAddedInMiddle(c *C) {
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading 1", LineNo: 2},
 		&parser.Token{Kind: gauge.StepKind, Value: oldStep, LineNo: 3, Args: []string{"name", "address", "number"}},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	agent, _ := getRefactorAgent(oldStep1, newStep, nil)
 	specs := append(make([]*gauge.Specification, 0), spec)
 	dictionary := gauge.NewConceptDictionary()
@@ -346,7 +348,7 @@ func (s *MySuite) TestRenamingWhenArgumentsIsRemovedFromLast(c *C) {
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading 1", LineNo: 2},
 		&parser.Token{Kind: gauge.StepKind, Value: oldStep, LineNo: 3, Args: []string{"name", "address", "number", "id"}},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	agent, _ := getRefactorAgent(oldStep1, newStep, nil)
 	specs := append(make([]*gauge.Specification, 0), spec)
 	dictionary := gauge.NewConceptDictionary()
@@ -367,7 +369,7 @@ func (s *MySuite) TestRenamingWhenArgumentsIsRemovedFromBegining(c *C) {
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading 1", LineNo: 2},
 		&parser.Token{Kind: gauge.StepKind, Value: oldStep, LineNo: 3, Args: []string{"name", "address", "number", "id"}},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	agent, _ := getRefactorAgent(oldStep1, newStep, nil)
 	specs := append(make([]*gauge.Specification, 0), spec)
 	dictionary := gauge.NewConceptDictionary()
@@ -388,7 +390,7 @@ func (s *MySuite) TestRenamingWhenArgumentsIsRemovedFromMiddle(c *C) {
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading 1", LineNo: 2},
 		&parser.Token{Kind: gauge.StepKind, Value: oldStep, LineNo: 3, Args: []string{"name", "address", "number", "id"}},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	agent, _ := getRefactorAgent(oldStep1, newStep, nil)
 	specs := append(make([]*gauge.Specification, 0), spec)
 	dictionary := gauge.NewConceptDictionary()
@@ -458,7 +460,7 @@ func (s *MySuite) TestRefactoringInContextStep(c *C) {
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading 1", LineNo: 2},
 		&parser.Token{Kind: gauge.StepKind, Value: oldStep + " sdf", LineNo: 3, Args: []string{"name", "address", "number", "id"}},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	agent, _ := getRefactorAgent(oldStep1, newStep, nil)
 	specs := append(make([]*gauge.Specification, 0), spec)
 	dictionary := gauge.NewConceptDictionary()
@@ -482,7 +484,7 @@ func (s *MySuite) TestRefactoringInTearDownStep(c *C) {
 		&parser.Token{Kind: gauge.TearDownKind, Value: "____", LineNo: 3},
 		&parser.Token{Kind: gauge.StepKind, Value: oldStep, LineNo: 3, Args: []string{"name", "address", "number", "id"}},
 	}
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	agent, _ := getRefactorAgent(oldStep1, newStep, nil)
 	specs := append(make([]*gauge.Specification, 0), spec)
 	dictionary := gauge.NewConceptDictionary()

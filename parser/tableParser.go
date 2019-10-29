@@ -19,23 +19,19 @@ package parser
 
 import (
 	"encoding/csv"
+	"os"
 	"strings"
 
+	"github.com/getgauge/gauge/env"
 	"github.com/getgauge/gauge/gauge"
-	"github.com/getgauge/gauge/gauge_messages"
 )
-
-func TableFrom(protoTable *gauge_messages.ProtoTable) *gauge.Table {
-	table := &gauge.Table{}
-	table.AddHeaders(protoTable.GetHeaders().GetCells())
-	for _, row := range protoTable.GetRows() {
-		table.AddRowValues(row.GetCells())
-	}
-	return table
-}
 
 func convertCsvToTable(csvContents string) (*gauge.Table, error) {
 	r := csv.NewReader(strings.NewReader(csvContents))
+	var de = os.Getenv(env.CsvDelimiter)
+	if de != "" {
+		r.Comma = []rune(os.Getenv(env.CsvDelimiter))[0]
+	}
 	r.Comment = '#'
 	lines, err := r.ReadAll()
 	if err != nil {
@@ -46,7 +42,7 @@ func convertCsvToTable(csvContents string) (*gauge.Table, error) {
 		if i == 0 {
 			table.AddHeaders(line)
 		} else {
-			table.AddRowValues(line)
+			table.AddRowValues(table.CreateTableCells(line))
 		}
 	}
 	return table, nil

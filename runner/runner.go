@@ -1,4 +1,4 @@
-// Copyright 2015 ThoughtWorks, Inc.
+// Copyright 2018 ThoughtWorks, Inc.
 
 // This file is part of Gauge.
 
@@ -31,6 +31,8 @@ import (
 
 	"sync"
 
+	"io"
+
 	"github.com/getgauge/common"
 	"github.com/getgauge/gauge/config"
 	"github.com/getgauge/gauge/conn"
@@ -38,13 +40,13 @@ import (
 	"github.com/getgauge/gauge/logger"
 	"github.com/getgauge/gauge/manifest"
 	"github.com/getgauge/gauge/plugin"
-	"github.com/getgauge/gauge/reporter"
 	"github.com/getgauge/gauge/version"
 )
 
 type Runner interface {
 	ExecuteAndGetStatus(m *gauge_messages.Message) *gauge_messages.ProtoExecutionResult
-	IsProcessRunning() bool
+	ExecuteMessageWithTimeout(m *gauge_messages.Message) (*gauge_messages.Message, error)
+	Alive() bool
 	Kill() error
 	Connection() net.Conn
 	IsMultithreaded() bool
@@ -57,15 +59,16 @@ type LanguageRunner struct {
 	connection    net.Conn
 	errorChannel  chan error
 	multiThreaded bool
+	lostContact   bool
 }
 
 type MultithreadedRunner struct {
 	r *LanguageRunner
 }
 
-func (r *MultithreadedRunner) IsProcessRunning() bool {
+func (r *MultithreadedRunner) Alive() bool {
 	if r.r.mutex != nil && r.r.Cmd != nil {
-		return r.r.IsProcessRunning()
+		return r.r.Alive()
 	}
 	return false
 }
@@ -80,12 +83,14 @@ func (r *MultithreadedRunner) SetConnection(c net.Conn) {
 
 func (r *MultithreadedRunner) Kill() error {
 	defer r.r.connection.Close()
-	conn.SendProcessKillMessage(r.r.connection)
-
+	err := conn.SendProcessKillMessage(r.r.connection)
+	if err != nil {
+		return err
+	}
 	exited := make(chan bool, 1)
 	go func() {
 		for {
-			if r.IsProcessRunning() {
+			if r.Alive() {
 				time.Sleep(100 * time.Millisecond)
 			} else {
 				exited <- true
@@ -111,7 +116,7 @@ func (r *MultithreadedRunner) Connection() net.Conn {
 
 func (r *MultithreadedRunner) killRunner() error {
 	if r.r.Cmd != nil && r.r.Cmd.Process != nil {
-		logger.Warning("Killing runner with PID:%d forcefully", r.r.Cmd.Process.Pid)
+		logger.Warningf(true, "Killing runner with PID:%d forcefully", r.r.Cmd.Process.Pid)
 		return r.r.Cmd.Process.Kill()
 	}
 	return nil
@@ -123,6 +128,11 @@ func (r *MultithreadedRunner) Pid() int {
 
 func (r *MultithreadedRunner) ExecuteAndGetStatus(message *gauge_messages.Message) *gauge_messages.ProtoExecutionResult {
 	return r.r.ExecuteAndGetStatus(message)
+}
+
+func (r *MultithreadedRunner) ExecuteMessageWithTimeout(message *gauge_messages.Message) (*gauge_messages.Message, error) {
+	r.r.EnsureConnected()
+	return conn.GetResponseForMessageWithTimeout(message, r.r.Connection(), config.RunnerRequestTimeout())
 }
 
 type RunnerInfo struct {
@@ -143,6 +153,7 @@ type RunnerInfo struct {
 	Lib                 string
 	Multithreaded       bool
 	GaugeVersionSupport version.VersionSupport
+	LspLangId           string
 }
 
 func ExecuteInitHookForRunner(language string) error {
@@ -153,22 +164,25 @@ func ExecuteInitHookForRunner(language string) error {
 	if err != nil {
 		return err
 	}
-	command := []string{}
+	var command []string
 	switch runtime.GOOS {
 	case "windows":
 		command = runnerInfo.Init.Windows
-		break
 	case "darwin":
 		command = runnerInfo.Init.Darwin
-		break
 	default:
 		command = runnerInfo.Init.Linux
-		break
 	}
 
 	languageJSONFilePath, err := plugin.GetLanguageJSONFilePath(language)
+	if err != nil {
+		return err
+	}
+
 	runnerDir := filepath.Dir(languageJSONFilePath)
-	cmd, err := common.ExecuteCommand(command, runnerDir, os.Stdout, os.Stderr)
+	logger.Debugf(true, "Running init hook command => %s", command)
+	writer := logger.NewLogWriter(language, true, 0)
+	cmd, err := common.ExecuteCommand(command, runnerDir, writer.Stdout, writer.Stderr)
 
 	if err != nil {
 		return err
@@ -195,11 +209,41 @@ func GetRunnerInfo(language string) (*RunnerInfo, error) {
 	}
 	return runnerInfo, nil
 }
-func (r *LanguageRunner) IsProcessRunning() bool {
+
+func (r *LanguageRunner) Alive() bool {
 	r.mutex.Lock()
 	ps := r.Cmd.ProcessState
 	r.mutex.Unlock()
 	return ps == nil || !ps.Exited()
+}
+
+func (r *LanguageRunner) EnsureConnected() bool {
+	if r.lostContact {
+		return false
+	}
+	c := r.connection
+	err := c.SetReadDeadline(time.Now())
+	if err != nil {
+		logger.Fatalf(true, "Unable to SetReadDeadLine on runner: %s", err.Error())
+	}
+	var one []byte
+	_, err = c.Read(one)
+	if err == io.EOF {
+		r.lostContact = true
+		logger.Fatalf(true, "Connection to runner with Pid %d lost. The runner probably quit unexpectedly. Inspect logs for potential reasons. Error : %s", r.Cmd.Process.Pid, err.Error())
+	}
+	opErr, ok := err.(*net.OpError)
+	if ok && !(opErr.Temporary() || opErr.Timeout()) {
+		r.lostContact = true
+		logger.Fatalf(true, "Connection to runner with Pid %d lost. The runner probably quit unexpectedly. Inspect logs for potential reasons. Error : %s", r.Cmd.Process.Pid, err.Error())
+	}
+	var zero time.Time
+	err = c.SetReadDeadline(zero)
+	if err != nil {
+		logger.Fatalf(true, "Unable to SetReadDeadLine on runner: %s", err.Error())
+	}
+
+	return true
 }
 
 func (r *LanguageRunner) IsMultithreaded() bool {
@@ -207,14 +251,17 @@ func (r *LanguageRunner) IsMultithreaded() bool {
 }
 
 func (r *LanguageRunner) Kill() error {
-	if r.IsProcessRunning() {
+	if r.Alive() {
 		defer r.connection.Close()
-		conn.SendProcessKillMessage(r.connection)
-
+		logger.Debug(true, "Sending kill message to runner.")
+		err := conn.SendProcessKillMessage(r.connection)
+		if err != nil {
+			return err
+		}
 		exited := make(chan bool, 1)
 		go func() {
 			for {
-				if r.IsProcessRunning() {
+				if r.Alive() {
 					time.Sleep(100 * time.Millisecond)
 				} else {
 					exited <- true
@@ -226,10 +273,11 @@ func (r *LanguageRunner) Kill() error {
 		select {
 		case done := <-exited:
 			if done {
+				logger.Debugf(true, "Runner with PID:%d has exited", r.Cmd.Process.Pid)
 				return nil
 			}
 		case <-time.After(config.PluginKillTimeout()):
-			logger.Warning("Killing runner with PID:%d forcefully", r.Cmd.Process.Pid)
+			logger.Warningf(true, "Killing runner with PID:%d forcefully", r.Cmd.Process.Pid)
 			return r.killRunner()
 		}
 	}
@@ -248,8 +296,12 @@ func (r *LanguageRunner) Pid() int {
 	return r.Cmd.Process.Pid
 }
 
+// ExecuteAndGetStatus invokes the runner with a request and waits for response. error is thrown only when unable to connect to runner
 func (r *LanguageRunner) ExecuteAndGetStatus(message *gauge_messages.Message) *gauge_messages.ProtoExecutionResult {
-	response, err := conn.GetResponseForGaugeMessage(message, r.connection)
+	if !r.EnsureConnected() {
+		return nil
+	}
+	response, err := conn.GetResponseForMessageWithTimeout(message, r.connection, 0)
 	if err != nil {
 		return &gauge_messages.ProtoExecutionResult{Failed: true, ErrorMessage: err.Error()}
 	}
@@ -258,42 +310,55 @@ func (r *LanguageRunner) ExecuteAndGetStatus(message *gauge_messages.Message) *g
 		executionResult := response.GetExecutionStatusResponse().GetExecutionResult()
 		if executionResult == nil {
 			errMsg := "ProtoExecutionResult obtained is nil"
-			logger.Errorf(errMsg)
+			logger.Errorf(true, errMsg)
 			return errorResult(errMsg)
 		}
 		return executionResult
 	}
 	errMsg := fmt.Sprintf("Expected ExecutionStatusResponse. Obtained: %s", response.GetMessageType())
-	logger.Errorf(errMsg)
+	logger.Errorf(true, errMsg)
 	return errorResult(errMsg)
+}
+
+func (r *LanguageRunner) ExecuteMessageWithTimeout(message *gauge_messages.Message) (*gauge_messages.Message, error) {
+	r.EnsureConnected()
+	return conn.GetResponseForMessageWithTimeout(message, r.Connection(), config.RunnerRequestTimeout())
 }
 
 func errorResult(message string) *gauge_messages.ProtoExecutionResult {
 	return &gauge_messages.ProtoExecutionResult{Failed: true, ErrorMessage: message, RecoverableError: false}
 }
 
-// Looks for a runner configuration inside the runner directory
-// finds the runner configuration matching to the manifest and executes the commands for the current OS
-func StartRunner(manifest *manifest.Manifest, port string, reporter reporter.Reporter, killChannel chan bool, debug bool) (*LanguageRunner, error) {
+func runRunnerCommand(manifest *manifest.Manifest, port string, debug bool, writer *logger.LogWriter) (*exec.Cmd, *RunnerInfo, error) {
 	var r RunnerInfo
 	runnerDir, err := getLanguageJSONFilePath(manifest, &r)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	compatibilityErr := version.CheckCompatibility(version.CurrentGaugeVersion, &r.GaugeVersionSupport)
 	if compatibilityErr != nil {
-		return nil, fmt.Errorf("Compatibility error. %s", compatibilityErr.Error())
+		return nil, nil, fmt.Errorf("Compatibility error. %s", compatibilityErr.Error())
 	}
 	command := getOsSpecificCommand(r)
-	env := getCleanEnv(port, os.Environ(), debug)
-	cmd, err := common.ExecuteCommandWithEnv(command, runnerDir, reporter, reporter, env)
+	env := getCleanEnv(port, os.Environ(), debug, getPluginPaths())
+	env = append(env, fmt.Sprintf("GAUGE_UNIQUE_INSTALLATION_ID=%s", config.UniqueID()))
+	env = append(env, fmt.Sprintf("GAUGE_TELEMETRY_ENABLED=%v", config.TelemetryEnabled()))
+	cmd, err := common.ExecuteCommandWithEnv(command, runnerDir, writer.Stdout, writer.Stderr, env)
+	return cmd, &r, err
+}
+
+// StartRunner Looks for a runner configuration inside the runner directory
+// finds the runner configuration matching to the manifest and executes the commands for the current OS
+func StartRunner(manifest *manifest.Manifest, port string, outputStreamWriter *logger.LogWriter, killChannel chan bool, debug bool) (*LanguageRunner, error) {
+	cmd, r, err := runRunnerCommand(manifest, port, debug, outputStreamWriter)
 	if err != nil {
 		return nil, err
 	}
 	go func() {
-		select {
-		case <-killChannel:
-			cmd.Process.Kill()
+		<-killChannel
+		err := cmd.Process.Kill()
+		if err != nil {
+			logger.Errorf(false, "Unable to kill %s with PID %d : %s", cmd.Path, cmd.Process.Pid, err.Error())
 		}
 	}()
 	// Wait for the process to exit so we will get a detailed error message
@@ -301,6 +366,13 @@ func StartRunner(manifest *manifest.Manifest, port string, reporter reporter.Rep
 	testRunner := &LanguageRunner{Cmd: cmd, errorChannel: errChannel, mutex: &sync.Mutex{}, multiThreaded: r.Multithreaded}
 	testRunner.waitAndGetErrorMessage()
 	return testRunner, nil
+}
+
+func getPluginPaths() (paths []string) {
+	for _, p := range plugin.PluginsWithoutScope() {
+		paths = append(paths, p.Path)
+	}
+	return
 }
 
 func getLanguageJSONFilePath(manifest *manifest.Manifest, r *RunnerInfo) (string, error) {
@@ -326,7 +398,7 @@ func (r *LanguageRunner) waitAndGetErrorMessage() {
 		r.Cmd.ProcessState = pState
 		r.mutex.Unlock()
 		if err != nil {
-			logger.Debug("Runner exited with error: %s", err)
+			logger.Debugf(true, "Runner exited with error: %s", err)
 			r.errorChannel <- fmt.Errorf("Runner exited with error: %s\n", err.Error())
 		}
 		if !pState.Success() {
@@ -335,13 +407,20 @@ func (r *LanguageRunner) waitAndGetErrorMessage() {
 	}()
 }
 
-func getCleanEnv(port string, env []string, debug bool) []string {
-	//clear environment variable common.GaugeInternalPortEnvName
+func getCleanEnv(port string, env []string, debug bool, pathToAdd []string) []string {
 	isPresent := false
 	for i, k := range env {
-		if strings.TrimSpace(strings.Split(k, "=")[0]) == common.GaugeInternalPortEnvName {
+		key := strings.TrimSpace(strings.Split(k, "=")[0])
+		//clear environment variable common.GaugeInternalPortEnvName
+		if key == common.GaugeInternalPortEnvName {
 			isPresent = true
 			env[i] = common.GaugeInternalPortEnvName + "=" + port
+		} else if strings.ToUpper(key) == "PATH" {
+			path := os.Getenv("PATH")
+			for _, p := range pathToAdd {
+				path += string(os.PathListSeparator) + p
+			}
+			env[i] = "PATH=" + path
 		}
 	}
 	if !isPresent {
@@ -354,17 +433,14 @@ func getCleanEnv(port string, env []string, debug bool) []string {
 }
 
 func getOsSpecificCommand(r RunnerInfo) []string {
-	command := []string{}
+	var command []string
 	switch runtime.GOOS {
 	case "windows":
 		command = r.Run.Windows
-		break
 	case "darwin":
 		command = r.Run.Darwin
-		break
 	default:
 		command = r.Run.Linux
-		break
 	}
 	return command
 }
@@ -378,7 +454,7 @@ type StartChannels struct {
 	KillChan chan bool
 }
 
-func Start(manifest *manifest.Manifest, reporter reporter.Reporter, killChannel chan bool, debug bool) (Runner, error) {
+func Start(manifest *manifest.Manifest, outputStreamWriter *logger.LogWriter, killChannel chan bool, debug bool) (Runner, error) {
 	port, err := conn.GetPortFromEnvironmentVariable(common.GaugePortEnvName)
 	if err != nil {
 		port = 0
@@ -387,22 +463,25 @@ func Start(manifest *manifest.Manifest, reporter reporter.Reporter, killChannel 
 	if err != nil {
 		return nil, err
 	}
-	runner, err := StartRunner(manifest, strconv.Itoa(handler.ConnectionPortNumber()), reporter, killChannel, debug)
+	logger.Debugf(true, "Staring %s runner", manifest.Language)
+	runner, err := StartRunner(manifest, strconv.Itoa(handler.ConnectionPortNumber()), outputStreamWriter, killChannel, debug)
 	if err != nil {
 		return nil, err
 	}
-	return connect(handler, runner)
+	err = connect(handler, runner)
+	return runner, err
 }
 
-func connect(h *conn.GaugeConnectionHandler, runner *LanguageRunner) (Runner, error) {
+func connect(h *conn.GaugeConnectionHandler, runner *LanguageRunner) error {
 	connection, connErr := h.AcceptConnection(config.RunnerConnectionTimeout(), runner.errorChannel)
 	if connErr != nil {
-		logger.Debug("Runner connection error: %s", connErr)
+		logger.Debugf(true, "Runner connection error: %s", connErr)
 		if err := runner.killRunner(); err != nil {
-			logger.Debug("Error while killing runner: %s", err)
+			logger.Debugf(true, "Error while killing runner: %s", err)
 		}
-		return nil, connErr
+		return connErr
 	}
 	runner.connection = connection
-	return runner, nil
+	logger.Debug(true, "Established connection to runner.")
+	return nil
 }

@@ -18,6 +18,7 @@
 package filter
 
 import (
+	"strings"
 	"github.com/getgauge/gauge/gauge"
 	"github.com/getgauge/gauge/logger"
 )
@@ -30,32 +31,59 @@ type tagsFilter struct {
 	tagExp string
 }
 
+type tagFilterForParallelRun struct {
+	tagExp string
+}
+
 type specsGroupFilter struct {
 	group       int
 	execStreams int
 }
 
+type scenariosFilter struct {
+	scenarios []string
+}
+
+func (tf *tagFilterForParallelRun) filter(specs []*gauge.Specification) ([]*gauge.Specification, []*gauge.Specification) {
+	return filterByTags(tf.tagExp, specs)
+}
+
 func (tagsFilter *tagsFilter) filter(specs []*gauge.Specification) []*gauge.Specification {
-	if tagsFilter.tagExp != "" {
-		validateTagExpression(tagsFilter.tagExp)
-		specs = filterSpecsByTags(specs, tagsFilter.tagExp)
-	}
+	specs, _ = filterByTags(tagsFilter.tagExp, specs)
 	return specs
+}
+
+func filterByTags(tagExpression string, specs []*gauge.Specification) ([]*gauge.Specification, []*gauge.Specification) {
+	if tagExpression != "" {
+		logger.Debugf(true, "Applying tags filter: %s", tagExpression)
+		validateTagExpression(tagExpression)
+		return filterSpecsByTags(specs, tagExpression)
+	}
+	return specs, specs
 }
 
 func (groupFilter *specsGroupFilter) filter(specs []*gauge.Specification) []*gauge.Specification {
 	if groupFilter.group == -1 {
 		return specs
 	}
-	logger.Info("Using the -g flag will make the distribution strategy 'eager'. The --strategy setting will be overridden.")
+	logger.Infof(true, "Using the -g flag will make the distribution strategy 'eager'. The --strategy setting will be overridden.")
 	if groupFilter.group < 1 || groupFilter.group > groupFilter.execStreams {
 		return make([]*gauge.Specification, 0)
 	}
+	logger.Debugf(true, "Applying group filter: %d", groupFilter.group)
 	group := DistributeSpecs(specs, groupFilter.execStreams)[groupFilter.group-1]
 	if group == nil {
 		return make([]*gauge.Specification, 0)
 	}
 	return group.Specs()
+}
+
+func (scenarioFilter *scenariosFilter) filter(specs []*gauge.Specification) []*gauge.Specification {
+	if len(scenarioFilter.scenarios) != 0 {
+		logger.Debugf(true, "Applying scenarios filter: %s", strings.Join(scenarioFilter.scenarios, ", "))
+		specs = filterSpecsByScenarioName(specs, scenarioFilter.scenarios)
+	}
+	return specs
 }
 
 func DistributeSpecs(specifications []*gauge.Specification, distributions int) []*gauge.SpecCollection {

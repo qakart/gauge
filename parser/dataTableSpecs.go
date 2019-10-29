@@ -17,25 +17,31 @@
 
 package parser
 
-import "github.com/getgauge/gauge/gauge"
+import (
+	"github.com/getgauge/gauge/env"
+	"github.com/getgauge/gauge/gauge"
+)
 
-// Creates a spec for each data table row
+// GetSpecsForDataTableRows creates a spec for each data table row
 func GetSpecsForDataTableRows(s []*gauge.Specification, errMap *gauge.BuildErrors) (specs []*gauge.Specification) {
 	for _, spec := range s {
 		if spec.DataTable.IsInitialized() {
 			if spec.UsesArgsInContextTeardown(spec.DataTable.Table.Headers...) {
 				specs = append(specs, createSpecsForTableRows(spec, spec.Scenarios, errMap)...)
 			} else {
-				nonTableRelatedScenarios, tableRelatedScenarios := FilterTableRelatedScenarios(spec.Scenarios, spec.DataTable.Table.Headers)
+				nonTableRelatedScenarios, tableRelatedScenarios := FilterTableRelatedScenarios(spec.Scenarios, func(scenario *gauge.Scenario) bool {
+					return scenario.UsesArgsInSteps(spec.DataTable.Table.Headers...)
+				})
 				if len(tableRelatedScenarios) > 0 {
 					s := createSpecsForTableRows(spec, tableRelatedScenarios, errMap)
 					s[0].Scenarios = append(s[0].Scenarios, nonTableRelatedScenarios...)
 					specs = append(specs, s...)
 				} else {
-					specs = append(specs, createSpec(copyScenarios(nonTableRelatedScenarios, gauge.Table{}, 0, errMap), &gauge.Table{}, spec))
+					specs = append(specs, createSpec(copyScenarios(nonTableRelatedScenarios, gauge.Table{}, 0, errMap), &gauge.Table{}, spec, errMap))
 				}
 			}
 		} else {
+			spec.Scenarios = copyScenarios(spec.Scenarios, gauge.Table{}, 0, errMap)
 			specs = append(specs, spec)
 		}
 	}
@@ -45,18 +51,15 @@ func GetSpecsForDataTableRows(s []*gauge.Specification, errMap *gauge.BuildError
 func createSpecsForTableRows(spec *gauge.Specification, scns []*gauge.Scenario, errMap *gauge.BuildErrors) (specs []*gauge.Specification) {
 	for i := range spec.DataTable.Table.Rows() {
 		t := getTableWithOneRow(spec.DataTable.Table, i)
-		newSpec := createSpec(copyScenarios(scns, *t, i, errMap), t, spec)
-		if len(errMap.SpecErrs[spec]) > 0 {
-			errMap.SpecErrs[newSpec] = errMap.SpecErrs[spec]
-		}
+		newSpec := createSpec(copyScenarios(scns, *t, i, errMap), t, spec, errMap)
 		specs = append(specs, newSpec)
 	}
 	return
 }
 
-func createSpec(scns []*gauge.Scenario, table *gauge.Table, spec *gauge.Specification) *gauge.Specification {
+func createSpec(scns []*gauge.Scenario, table *gauge.Table, spec *gauge.Specification, errMap *gauge.BuildErrors) *gauge.Specification {
 	dt := &gauge.DataTable{Table: *table, Value: spec.DataTable.Value, LineNo: spec.DataTable.LineNo, IsExternal: spec.DataTable.IsExternal}
-	s := &gauge.Specification{DataTable: *dt, FileName: spec.FileName, Heading: spec.Heading, Scenarios: scns, Contexts: spec.Contexts, TearDownSteps: spec.TearDownSteps}
+	s := &gauge.Specification{DataTable: *dt, FileName: spec.FileName, Heading: spec.Heading, Scenarios: scns, Contexts: spec.Contexts, TearDownSteps: spec.TearDownSteps, Tags: spec.Tags}
 	index := 0
 	for _, item := range spec.Items {
 		if item.Kind() == gauge.DataTableKind {
@@ -73,25 +76,42 @@ func createSpec(scns []*gauge.Scenario, table *gauge.Table, spec *gauge.Specific
 	for i := index; i < len(scns); i++ {
 		s.Items = append(s.Items, scns[i])
 	}
+	if len(errMap.SpecErrs[spec]) > 0 {
+		errMap.SpecErrs[s] = errMap.SpecErrs[spec]
+	}
 	return s
 }
 
 func copyScenarios(scenarios []*gauge.Scenario, table gauge.Table, i int, errMap *gauge.BuildErrors) (scns []*gauge.Scenario) {
-	for _, scn := range scenarios {
+	var create = func(scn *gauge.Scenario, scnTableRow gauge.Table, scnTableRowIndex int) *gauge.Scenario {
 		newScn := &gauge.Scenario{
-			Steps:             scn.Steps,
-			Items:             scn.Items,
-			Heading:           scn.Heading,
-			DataTableRow:      table,
-			DataTableRowIndex: i,
-			Tags:              scn.Tags,
-			Comments:          scn.Comments,
-			Span:              scn.Span,
+			Steps:                 scn.Steps,
+			Items:                 scn.Items,
+			Heading:               scn.Heading,
+			SpecDataTableRow:      table,
+			SpecDataTableRowIndex: i,
+			Tags:                  scn.Tags,
+			Comments:              scn.Comments,
+			Span:                  scn.Span,
+		}
+		if scnTableRow.IsInitialized() {
+			newScn.ScenarioDataTableRow = scnTableRow
+			newScn.ScenarioDataTableRowIndex = scnTableRowIndex
 		}
 		if len(errMap.ScenarioErrs[scn]) > 0 {
 			errMap.ScenarioErrs[newScn] = errMap.ScenarioErrs[scn]
 		}
-		scns = append(scns, newScn)
+		return newScn
+	}
+	for _, scn := range scenarios {
+		if scn.DataTable.IsInitialized() && env.AllowScenarioDatatable() {
+			for i := range scn.DataTable.Table.Rows() {
+				t := getTableWithOneRow(scn.DataTable.Table, i)
+				scns = append(scns, create(scn, *t, i))
+			}
+		} else {
+			scns = append(scns, create(scn, gauge.Table{}, 0))
+		}
 	}
 	return
 }
@@ -104,9 +124,10 @@ func getTableWithOneRow(t gauge.Table, i int) *gauge.Table {
 	return gauge.NewTable(t.Headers, row, t.LineNo)
 }
 
-func FilterTableRelatedScenarios(scenarios []*gauge.Scenario, headers []string) (otherScenarios, tableRelatedScenarios []*gauge.Scenario) {
+// FilterTableRelatedScenarios filters Scenarios that are using dynamic params from data table.
+func FilterTableRelatedScenarios(scenarios []*gauge.Scenario, fun func(*gauge.Scenario) bool) (otherScenarios, tableRelatedScenarios []*gauge.Scenario) {
 	for _, scenario := range scenarios {
-		if scenario.UsesArgsInSteps(headers...) {
+		if fun(scenario) {
 			tableRelatedScenarios = append(tableRelatedScenarios, scenario)
 		} else {
 			otherScenarios = append(otherScenarios, scenario)

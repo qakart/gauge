@@ -21,23 +21,45 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
-	"github.com/dmotylev/goproperties"
+	"regexp"
+	"strings"
+
+	properties "github.com/dmotylev/goproperties"
 	"github.com/getgauge/common"
 	"github.com/getgauge/gauge/config"
+	"github.com/getgauge/gauge/logger"
 )
 
 const (
-	GaugeReportsDir     = "gauge_reports_dir"
-	LogsDirectory       = "logs_directory"
-	OverwriteReports    = "overwrite_reports"
+	// SpecsDir holds the location of spec files
+	SpecsDir = "gauge_specs_dir"
+	// GaugeReportsDir holds the location of reports
+	GaugeReportsDir = "gauge_reports_dir"
+	// GaugeEnvironment holds the name of the current environment
+	GaugeEnvironment = "gauge_environment"
+	// LogsDirectory holds the location of log files
+	LogsDirectory = "logs_directory"
+	// OverwriteReports = false will create a new directory for reports
+	// for every run.
+	OverwriteReports = "overwrite_reports"
+	// ScreenshotOnFailure indicates if failure should invoke screenshot
 	ScreenshotOnFailure = "screenshot_on_failure"
-	SaveExecutionResult = "save_execution_result" // determines if last run result should be saved
+	saveExecutionResult = "save_execution_result"
+	// CsvDelimiter holds delimiter used to parse csv files
+	CsvDelimiter                   = "csv_delimiter"
+	allowMultilineStep             = "allow_multiline_step"
+	allowScenarioDatatable         = "allow_scenario_datatable"
+	allowFilteredParallelExecution = "allow_filtered_parallel_execution"
+	enableMultithreading           = "enable_multithreading"
+	useTestGA                      = "use_test_ga"
+	telemetryInterval              = "gauge_telemetry_interval"
 )
 
 var envVars map[string]string
 
-var currentEnv = "default"
+var currentEnvironments = []string{}
 
 // LoadEnv first generates the map of the env vars that needs to be set.
 // It starts by populating the map with the env passed by the user in --env flag.
@@ -46,22 +68,39 @@ var currentEnv = "default"
 //
 // Finally, all the env vars present in the map are actually set in the shell.
 func LoadEnv(envName string) error {
-	envVars = make(map[string]string)
-	currentEnv = envName
+	allEnvs := strings.Split(envName, ",")
 
-	err := loadEnvDir(currentEnv)
-	if err != nil {
-		return fmt.Errorf("Failed to load env. %s", err.Error())
+	envVars = make(map[string]string)
+
+	defaultEnvLoaded := false
+	for _, env := range allEnvs {
+		env = strings.TrimSpace(env)
+
+		err := loadEnvDir(env)
+		if err != nil {
+			return fmt.Errorf("Failed to load env. %s", err.Error())
+		}
+
+		if env == common.DefaultEnvDir {
+			defaultEnvLoaded = true
+		} else {
+			currentEnvironments = append(currentEnvironments, env)
+		}
 	}
 
-	if currentEnv != "default" {
-		err := loadEnvDir("default")
+	if !defaultEnvLoaded {
+		err := loadEnvDir(common.DefaultEnvDir)
 		if err != nil {
 			return fmt.Errorf("Failed to load env. %s", err.Error())
 		}
 	}
 
 	loadDefaultEnvVars()
+
+	err := substituteEnvVars()
+	if err != nil {
+		return fmt.Errorf("%s", err.Error())
+	}
 
 	err = setEnvVars()
 	if err != nil {
@@ -71,33 +110,45 @@ func LoadEnv(envName string) error {
 }
 
 func loadDefaultEnvVars() {
+	addEnvVar(SpecsDir, "specs")
 	addEnvVar(GaugeReportsDir, "reports")
+	addEnvVar(GaugeEnvironment, common.DefaultEnvDir)
 	addEnvVar(LogsDirectory, "logs")
 	addEnvVar(OverwriteReports, "true")
 	addEnvVar(ScreenshotOnFailure, "true")
-	addEnvVar(SaveExecutionResult, "false")
+	addEnvVar(saveExecutionResult, "false")
+	addEnvVar(CsvDelimiter, ",")
+	addEnvVar(allowMultilineStep, "false")
+	addEnvVar(allowScenarioDatatable, "false")
+	addEnvVar(allowFilteredParallelExecution, "false")
+	addEnvVar(useTestGA, "false")
 }
 
 func loadEnvDir(envName string) error {
 	envDirPath := filepath.Join(config.ProjectRoot, common.EnvDirectoryName, envName)
 	if !common.DirExists(envDirPath) {
-		if envName != "default" {
+		if envName != common.DefaultEnvDir {
 			return fmt.Errorf("%s environment does not exist", envName)
 		}
 		return nil
 	}
-
+	addEnvVar(GaugeEnvironment, envName)
+	logger.Debugf(true, "'%s' set to '%s'", GaugeEnvironment, envName)
 	return filepath.Walk(envDirPath, loadEnvFile)
 }
 
 func loadEnvFile(path string, info os.FileInfo, err error) error {
+	if err != nil {
+		return err
+	}
+
 	if !isPropertiesFile(path) {
 		return nil
 	}
 
-	properties, err := properties.Load(path)
-	if err != nil {
-		return fmt.Errorf("Failed to parse: %s. %s", path, err.Error())
+	properties, err1 := properties.Load(path)
+	if err1 != nil {
+		return fmt.Errorf("Failed to parse: %s. %s", path, err1.Error())
 	}
 
 	for property, value := range properties {
@@ -117,6 +168,31 @@ func isPropertiesFile(path string) bool {
 	return filepath.Ext(path) == ".properties"
 }
 
+func substituteEnvVars() error {
+	for name, value := range envVars {
+		contains, matches := containsEnvVar(value)
+		// if value contains an env var E.g. ${foo}
+		if contains {
+			for _, match := range matches {
+				// check if match is from properties file
+				// if not, get from system env
+				envKey, property := match[0], match[1]
+				// error if env property is not found
+				if !isPropertySet(property) {
+					return fmt.Errorf("'%s' env variable was not set", property)
+				}
+				// get env var from system
+				propertyValue := os.Getenv(property)
+				// replace env key with property value
+				value = strings.Replace(value, envKey, propertyValue, -1)
+			}
+			// overwrite the envVar value
+			envVars[name] = value
+		}
+	}
+	return nil
+}
+
 func setEnvVars() error {
 	for name, value := range envVars {
 		if !isPropertySet(name) {
@@ -133,7 +209,71 @@ func isPropertySet(property string) bool {
 	return len(os.Getenv(property)) > 0
 }
 
-// CurrentEnv returns the value of currentEnv
-func CurrentEnv() string {
-	return currentEnv
+func containsEnvVar(value string) (contains bool, matches [][]string) {
+	// match for any ${foo}
+	rStr := `\$\{(\w+)\}`
+	r, err := regexp.Compile(rStr)
+	if err != nil {
+		logger.Errorf(false, "Unable to compile regex %s: %s", rStr, err.Error())
+	}
+	contains = r.MatchString(value)
+	if contains {
+		matches = r.FindAllStringSubmatch(value, -1)
+	}
+	return
+}
+
+// comma-separated value of environments
+func CurrentEnvironments() string {
+	if len(currentEnvironments) == 0 {
+		currentEnvironments = append(currentEnvironments, common.DefaultEnvDir)
+	}
+	return strings.Join(currentEnvironments, ",")
+}
+
+func convertToBool(property string, defaultValue bool) bool {
+	v := os.Getenv(property)
+	boolValue, err := strconv.ParseBool(strings.TrimSpace(v))
+	if err != nil {
+		logger.Warningf(true, "Incorrect value for %s in property file. Cannot convert %s to boolean.", property, v)
+		logger.Warningf(true, "Using default value %v for property %s.", defaultValue, property)
+		return defaultValue
+	}
+	return boolValue
+}
+
+// AllowFilteredParallelExecution - feature toggle for filtered parallel execution
+var AllowFilteredParallelExecution = func() bool {
+	return convertToBool(allowFilteredParallelExecution, false)
+}
+
+// AllowScenarioDatatable -feature toggle for datatables in scenario
+var AllowScenarioDatatable = func() bool {
+	return convertToBool(allowScenarioDatatable, false)
+}
+
+// AllowMultiLineStep - feature toggle for newline in step text
+var AllowMultiLineStep = func() bool {
+	return convertToBool(allowMultilineStep, false)
+}
+
+// SaveExecutionResult determines if last run result should be saved
+var SaveExecutionResult = func() bool {
+	return convertToBool(saveExecutionResult, false)
+}
+
+// EnableMultiThreadedExecution determines if threads should be used instead of process
+// for each parallel stream
+var EnableMultiThreadedExecution = func() bool {
+	return convertToBool(enableMultithreading, false)
+}
+
+// UseTestGA checks if test google analytics account needs to be used
+var UseTestGA = func() bool {
+	return strings.ToLower(os.Getenv(useTestGA)) == "true"
+}
+
+// TelemetryInterval allows to configure duration for which telemetry is to be sent, when UseTestGA is true.
+var TelemetryInterval = func() string {
+	return strings.ToLower(os.Getenv(telemetryInterval))
 }

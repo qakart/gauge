@@ -33,6 +33,7 @@ type StepValue struct {
 
 type Step struct {
 	LineNo         int
+	FileName       string
 	Value          string
 	LineText       string
 	Args           []*StepArg
@@ -47,16 +48,25 @@ type Step struct {
 	Suffix         string
 }
 
-func (step *Step) GetArg(name string) *StepArg {
-	arg := step.Lookup.GetArg(name)
+type StepDiff struct {
+	OldStep   Step
+	NewStep   *Step
+	IsConcept bool
+}
+
+func (step *Step) GetArg(name string) (*StepArg, error) {
+	arg, err := step.Lookup.GetArg(name)
+	if err != nil {
+		return nil, err
+	}
 	// Return static values
 	if arg != nil && arg.ArgType != Dynamic {
-		return arg
+		return arg, nil
 	}
 	if step.Parent == nil {
-		return step.Lookup.GetArg(name)
+		return arg, nil
 	}
-	return step.Parent.GetArg(step.Lookup.GetArg(name).Value)
+	return step.Parent.GetArg(arg.Value)
 }
 
 func (step *Step) GetFragments() []*gauge_messages.Fragment {
@@ -70,23 +80,36 @@ func (step *Step) GetLineText() string {
 	return step.LineText
 }
 
-func (step *Step) Rename(oldStep Step, newStep Step, isRefactored bool, orderMap map[int]int, isConcept *bool) bool {
+func (step *Step) Rename(oldStep Step, newStep Step, isRefactored bool, orderMap map[int]int, isConcept *bool) (*StepDiff, bool) {
+	diff := &StepDiff{OldStep: *step}
 	if strings.TrimSpace(step.Value) != strings.TrimSpace(oldStep.Value) {
-		return isRefactored
+		return nil, isRefactored
 	}
 	if step.IsConcept {
 		*isConcept = true
 	}
 	step.Value = newStep.Value
-
+	diff.IsConcept = *isConcept
 	step.Args = step.getArgsInOrder(newStep, orderMap)
-	return true
+	diff.NewStep = step
+	return diff, true
 }
 
 func (step *Step) UsesDynamicArgs(args ...string) bool {
 	for _, arg := range args {
 		for _, stepArg := range step.Args {
-			if stepArg.Value == arg && stepArg.ArgType == Dynamic {
+			if (stepArg.Value == arg && stepArg.ArgType == Dynamic) || (stepArg.ArgType == TableArg && tableUsesDynamicArgs(stepArg, arg)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func tableUsesDynamicArgs(tableArg *StepArg, arg string) bool {
+	for _, cells := range tableArg.Table.Columns {
+		for _, cell := range cells {
+			if cell.CellType == Dynamic && cell.Value == arg {
 				return true
 			}
 		}
@@ -98,8 +121,15 @@ func (step *Step) getArgsInOrder(newStep Step, orderMap map[int]int) []*StepArg 
 	args := make([]*StepArg, len(newStep.Args))
 	for key, value := range orderMap {
 		arg := &StepArg{Value: newStep.Args[key].Value, ArgType: Static}
+		if newStep.Args[key].ArgType == SpecialString || newStep.Args[key].ArgType == SpecialTable {
+			arg = &StepArg{Name: newStep.Args[key].Name, Value: newStep.Args[key].Value, ArgType: newStep.Args[key].ArgType}
+		}
 		if step.IsConcept {
-			arg = &StepArg{Value: newStep.Args[key].Value, ArgType: Dynamic}
+			name := fmt.Sprintf("arg%d", key)
+			if newStep.Args[key].Value != "" && newStep.Args[key].ArgType != SpecialString {
+				name = newStep.Args[key].Value
+			}
+			arg = &StepArg{Name: name, Value: newStep.Args[key].Value, ArgType: Dynamic}
 		}
 		if value != -1 {
 			arg = step.Args[value]
@@ -109,26 +139,20 @@ func (step *Step) getArgsInOrder(newStep Step, orderMap map[int]int) []*StepArg 
 	return args
 }
 
-func (step *Step) deepCopyStepArgs() []*StepArg {
-	copiedStepArgs := make([]*StepArg, 0)
-	for _, conceptStepArg := range step.Args {
-		temp := new(StepArg)
-		*temp = *conceptStepArg
-		copiedStepArgs = append(copiedStepArgs, temp)
-	}
-	return copiedStepArgs
-}
-
 func (step *Step) ReplaceArgsWithDynamic(args []*StepArg) {
 	for i, arg := range step.Args {
 		for _, conceptArg := range args {
 			if arg.String() == conceptArg.String() {
 				if conceptArg.ArgType == SpecialString || conceptArg.ArgType == SpecialTable {
 					reg := regexp.MustCompile(".*:")
-					step.Args[i] = &StepArg{Value: reg.ReplaceAllString(conceptArg.Name, ""), ArgType: Dynamic}
+					step.Args[i] = &StepArg{Name: reg.ReplaceAllString(conceptArg.Name, ""), ArgType: Dynamic}
 					continue
 				}
-				step.Args[i] = &StepArg{Value: replaceParamChar(conceptArg.Value), ArgType: Dynamic}
+				if conceptArg.ArgType == Dynamic {
+					step.Args[i] = &StepArg{Name: replaceParamChar(conceptArg.Name), ArgType: Dynamic}
+					continue
+				}
+				step.Args[i] = &StepArg{Name: replaceParamChar(conceptArg.Value), ArgType: Dynamic}
 			}
 		}
 	}
@@ -149,6 +173,10 @@ func (step *Step) AddInlineTableRow(row []TableCell) {
 	lastArg := step.Args[len(step.Args)-1]
 	lastArg.Table.addRows(row)
 	step.PopulateFragments()
+}
+
+func (step *Step) GetLastArg() *StepArg {
+	return step.Args[len(step.Args)-1]
 }
 
 func (step *Step) PopulateFragments() {
@@ -187,52 +215,59 @@ func (step *Step) InConcept() bool {
 
 // Not copying parent as it enters an infinite loop in case of nested concepts. This is because the steps under the concept
 // are copied and their parent copying again comes back to copy the same concept.
-func (self *Step) GetCopy() *Step {
-	if !self.IsConcept {
-		return self
+func (step *Step) GetCopy() (*Step, error) {
+	if !step.IsConcept {
+		return step, nil
 	}
 	nestedStepsCopy := make([]*Step, 0)
-	for _, nestedStep := range self.ConceptSteps {
-		nestedStepsCopy = append(nestedStepsCopy, nestedStep.GetCopy())
+	for _, nestedStep := range step.ConceptSteps {
+		nestedStepCopy, err := nestedStep.GetCopy()
+		if err != nil {
+			return nil, err
+		}
+		nestedStepsCopy = append(nestedStepsCopy, nestedStepCopy)
 	}
 
 	copiedConceptStep := new(Step)
-	*copiedConceptStep = *self
+	*copiedConceptStep = *step
 	copiedConceptStep.ConceptSteps = nestedStepsCopy
-	copiedConceptStep.Lookup = *self.Lookup.GetCopy()
-	return copiedConceptStep
+	lookupCopy, err := step.Lookup.GetCopy()
+	if err != nil {
+		return nil, err
+	}
+	copiedConceptStep.Lookup = *lookupCopy
+	return copiedConceptStep, nil
 }
 
-func (self *Step) CopyFrom(another *Step) {
-	self.IsConcept = another.IsConcept
+func (step *Step) CopyFrom(another *Step) {
+	step.IsConcept = another.IsConcept
 
 	if another.Args == nil {
-		self.Args = nil
+		step.Args = nil
 	} else {
-		self.Args = make([]*StepArg, len(another.Args))
-		copy(self.Args, another.Args)
+		step.Args = make([]*StepArg, len(another.Args))
+		copy(step.Args, another.Args)
 	}
 
 	if another.ConceptSteps == nil {
-		self.ConceptSteps = nil
+		step.ConceptSteps = nil
 	} else {
-		self.ConceptSteps = make([]*Step, len(another.ConceptSteps))
-		copy(self.ConceptSteps, another.ConceptSteps)
+		step.ConceptSteps = make([]*Step, len(another.ConceptSteps))
+		copy(step.ConceptSteps, another.ConceptSteps)
 	}
 
 	if another.Fragments == nil {
-		self.Fragments = nil
+		step.Fragments = nil
 	} else {
-		self.Fragments = make([]*gauge_messages.Fragment, len(another.Fragments))
-		copy(self.Fragments, another.Fragments)
+		step.Fragments = make([]*gauge_messages.Fragment, len(another.Fragments))
+		copy(step.Fragments, another.Fragments)
 	}
 
-	self.LineNo = another.LineNo
-	self.LineText = another.LineText
-	self.HasInlineTable = another.HasInlineTable
-	self.Value = another.Value
-	self.Lookup = another.Lookup
-	self.Parent = another.Parent
+	step.LineText = another.LineText
+	step.HasInlineTable = another.HasInlineTable
+	step.Value = another.Value
+	step.Lookup = another.Lookup
+	step.Parent = another.Parent
 }
 
 func (step Step) Kind() TokenKind {

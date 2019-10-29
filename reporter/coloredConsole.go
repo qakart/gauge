@@ -41,30 +41,45 @@ func newColoredConsole(out io.Writer) *coloredConsole {
 	return &coloredConsole{writer: goterminal.New(out)}
 }
 
-func (c *coloredConsole) SpecStart(heading string) {
-	msg := formatSpec(heading)
-	logger.GaugeLog.Info(msg)
+func (c *coloredConsole) SuiteStart() {
+}
+
+func (c *coloredConsole) SpecStart(spec *gauge.Specification, res result.Result) {
+	if res.(*result.SpecResult).Skipped {
+		return
+	}
+	msg := formatSpec(spec.Heading.Value)
+	logger.Info(false, msg)
 	c.displayMessage(msg+newline, ct.Cyan)
 	c.writer.Reset()
 }
 
-func (c *coloredConsole) SpecEnd(res result.Result) {
+func (c *coloredConsole) SpecEnd(spec *gauge.Specification, res result.Result) {
+	if res.(*result.SpecResult).Skipped {
+		return
+	}
 	printHookFailureCC(c, res, res.GetPreHook)
 	printHookFailureCC(c, res, res.GetPostHook)
 	c.displayMessage(newline, ct.None)
 	c.writer.Reset()
 }
 
-func (c *coloredConsole) ScenarioStart(scenarioHeading string) {
+func (c *coloredConsole) ScenarioStart(scenario *gauge.Scenario, i gauge_messages.ExecutionInfo, res result.Result) {
+	if res.(*result.ScenarioResult).ProtoScenario.ExecutionStatus == gauge_messages.ExecutionStatus_SKIPPED {
+		return
+	}
 	c.indentation += scenarioIndentation
-	msg := formatScenario(scenarioHeading)
-	logger.GaugeLog.Info(msg)
+	msg := formatScenario(scenario.Heading.Value)
+	logger.Info(false, msg)
 
 	indentedText := indent(msg+"\t", c.indentation)
 	c.displayMessage(indentedText, ct.Yellow)
 }
 
-func (c *coloredConsole) ScenarioEnd(res result.Result) {
+func (c *coloredConsole) ScenarioEnd(scenario *gauge.Scenario, res result.Result, i gauge_messages.ExecutionInfo) {
+	if res.(*result.ScenarioResult).ProtoScenario.ExecutionStatus == gauge_messages.ExecutionStatus_SKIPPED {
+		return
+	}
 	if printHookFailureCC(c, res, res.GetPreHook) {
 		if c.sceFailuresBuf.Len() != 0 {
 			c.displayMessage(newline+strings.Trim(c.sceFailuresBuf.String(), newline)+newline, ct.Red)
@@ -81,7 +96,7 @@ func (c *coloredConsole) ScenarioEnd(res result.Result) {
 
 func (c *coloredConsole) StepStart(stepText string) {
 	c.indentation += stepIndentation
-	logger.GaugeLog.Debug(stepText)
+	logger.Debug(false, stepText)
 }
 
 func (c *coloredConsole) StepEnd(step gauge.Step, res result.Result, execInfo gauge_messages.ExecutionInfo) {
@@ -95,16 +110,19 @@ func (c *coloredConsole) StepEnd(step gauge.Step, res result.Result, execInfo ga
 	}
 	if printHookFailureCC(c, res, res.GetPreHook) && stepRes.GetStepFailed() {
 		stepText := strings.TrimLeft(prepStepMsg(step.LineText), newline)
-		logger.GaugeLog.Error(stepText)
+		logger.Error(false, stepText)
 		errMsg := prepErrorMessage(stepRes.ProtoStepExecResult().GetExecutionResult().GetErrorMessage())
-		logger.GaugeLog.Error(errMsg)
+		logger.Error(false, errMsg)
 		specInfo := prepSpecInfo(execInfo.GetCurrentSpec().GetFileName(), step.LineNo, step.InConcept())
-		logger.GaugeLog.Error(specInfo)
+		logger.Error(false, specInfo)
 		stacktrace := prepStacktrace(stepRes.ProtoStepExecResult().GetExecutionResult().GetStackTrace())
-		logger.GaugeLog.Error(stacktrace)
+		logger.Error(false, stacktrace)
 
 		failureMsg := formatErrorFragment(stepText, c.indentation) + formatErrorFragment(specInfo, c.indentation) + formatErrorFragment(errMsg, c.indentation) + formatErrorFragment(stacktrace, c.indentation)
-		c.sceFailuresBuf.WriteString(failureMsg)
+		_, err := c.sceFailuresBuf.WriteString(failureMsg)
+		if err != nil {
+			logger.Errorf(true, "Error writing to scenario failure buffer: %s", err.Error())
+		}
 	}
 	printHookFailureCC(c, res, res.GetPostHook)
 	c.indentation -= stepIndentation
@@ -112,7 +130,7 @@ func (c *coloredConsole) StepEnd(step gauge.Step, res result.Result, execInfo ga
 
 func (c *coloredConsole) ConceptStart(conceptHeading string) {
 	c.indentation += stepIndentation
-	logger.GaugeLog.Debug(conceptHeading)
+	logger.Debug(false, conceptHeading)
 }
 
 func (c *coloredConsole) ConceptEnd(res result.Result) {
@@ -124,20 +142,20 @@ func (c *coloredConsole) SuiteEnd(res result.Result) {
 	printHookFailureCC(c, res, res.GetPreHook)
 	printHookFailureCC(c, res, res.GetPostHook)
 	for _, e := range suiteRes.UnhandledErrors {
-		logger.GaugeLog.Error(e.Error())
+		logger.Error(false, e.Error())
 		c.displayMessage(indent(e.Error(), c.indentation+errorIndentation)+newline, ct.Red)
 	}
 }
 
 func (c *coloredConsole) DataTable(table string) {
-	logger.GaugeLog.Debug(table)
+	logger.Debug(false, table)
 	c.displayMessage(table, ct.Yellow)
 	c.writer.Reset()
 }
 
 func (c *coloredConsole) Errorf(text string, args ...interface{}) {
 	msg := fmt.Sprintf(text, args...)
-	logger.GaugeLog.Error(msg)
+	logger.Error(false, msg)
 	msg = indent(msg, c.indentation+errorIndentation) + newline
 	c.displayMessage(msg, ct.Red)
 }
@@ -160,9 +178,9 @@ func (c *coloredConsole) displayMessage(msg string, color ct.Color) {
 func printHookFailureCC(c *coloredConsole, res result.Result, hookFailure func() []*gauge_messages.ProtoHookFailure) bool {
 	if len(hookFailure()) > 0 {
 		errMsg := prepErrorMessage(hookFailure()[0].GetErrorMessage())
-		logger.GaugeLog.Error(errMsg)
+		logger.Error(false, errMsg)
 		stacktrace := prepStacktrace(hookFailure()[0].GetStackTrace())
-		logger.GaugeLog.Error(stacktrace)
+		logger.Error(false, stacktrace)
 		c.displayMessage(newline+formatErrorFragment(errMsg, c.indentation)+formatErrorFragment(stacktrace, c.indentation), ct.Red)
 		return false
 	}

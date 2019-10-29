@@ -26,15 +26,16 @@ import (
 	"github.com/getgauge/gauge/gauge"
 	"github.com/getgauge/gauge/gauge_messages"
 	"github.com/getgauge/gauge/logger"
-
 	"github.com/getgauge/gauge/manifest"
 	"github.com/getgauge/gauge/plugin"
 	"github.com/getgauge/gauge/runner"
 )
 
+// ExecuteTags holds the tags to filter the execution by
 var ExecuteTags = ""
 var tableRowsIndexes []int
 
+// SetTableRows is used to limit data driven execution to specific rows
 func SetTableRows(tableRows string) {
 	tableRowsIndexes = getDataTableRows(tableRows)
 }
@@ -78,7 +79,7 @@ func (e *simpleExecution) execute() {
 		e.suiteResult.UpdateExecTime(e.startTime)
 		e.suiteResult.SetSpecsSkippedCount()
 	}
-
+	logger.Debug(true, "Initialising suite data store.")
 	initSuiteDataStoreResult := e.initSuiteDataStore()
 	if initSuiteDataStoreResult.GetFailed() {
 		e.suiteResult.AddUnhandledError(fmt.Errorf("Failed to initialize suite datastore. Error: %s", initSuiteDataStoreResult.GetErrorMessage()))
@@ -112,7 +113,7 @@ func (e *simpleExecution) finish() {
 func (e *simpleExecution) stopAllPlugins() {
 	e.notifyExecutionStop()
 	if err := e.runner.Kill(); err != nil {
-		logger.Errorf("Failed to kill Runner: %s", err.Error())
+		logger.Errorf(true, "Failed to kill Runner: %s", err.Error())
 	}
 }
 
@@ -148,20 +149,28 @@ func (e *simpleExecution) executeSpecs(sc *gauge.SpecCollection) (results []*res
 
 func (e *simpleExecution) notifyBeforeSuite() {
 	m := &gauge_messages.Message{MessageType: gauge_messages.Message_ExecutionStarting,
-		ExecutionStartingRequest: &gauge_messages.ExecutionStartingRequest{}}
+		ExecutionStartingRequest: &gauge_messages.ExecutionStartingRequest{CurrentExecutionInfo: e.currentExecutionInfo}}
 	res := e.executeHook(m)
+	e.suiteResult.PreHookMessages = res.Message
+	e.suiteResult.PreHookScreenshots = res.Screenshots
 	if res.GetFailed() {
 		handleHookFailure(e.suiteResult, res, result.AddPreHook)
 	}
+	m.ExecutionStartingRequest.SuiteResult = gauge.ConvertToProtoSuiteResult(e.suiteResult)
+	e.pluginHandler.NotifyPlugins(m)
 }
 
 func (e *simpleExecution) notifyAfterSuite() {
 	m := &gauge_messages.Message{MessageType: gauge_messages.Message_ExecutionEnding,
 		ExecutionEndingRequest: &gauge_messages.ExecutionEndingRequest{CurrentExecutionInfo: e.currentExecutionInfo}}
 	res := e.executeHook(m)
+	e.suiteResult.PostHookMessages = res.Message
+	e.suiteResult.PostHookScreenshots = res.Screenshots
 	if res.GetFailed() {
 		handleHookFailure(e.suiteResult, res, result.AddPostHook)
 	}
+	m.ExecutionEndingRequest.SuiteResult = gauge.ConvertToProtoSuiteResult(e.suiteResult)
+	e.pluginHandler.NotifyPlugins(m)
 }
 
 func (e *simpleExecution) initSuiteDataStore() *(gauge_messages.ProtoExecutionResult) {

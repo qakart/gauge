@@ -20,7 +20,10 @@ package formatter
 import (
 	"testing"
 
+	"github.com/getgauge/gauge/env"
+
 	"github.com/getgauge/gauge/gauge"
+	"github.com/getgauge/gauge/gauge_messages"
 	"github.com/getgauge/gauge/parser"
 	. "gopkg.in/check.v1"
 )
@@ -42,28 +45,26 @@ func (s *MySuite) TestFormatSpecification(c *C) {
 		&parser.Token{Kind: gauge.TableRow, Args: []string{"2", "bar"}},
 	}
 
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 
 	formatted := FormatSpecification(spec)
 
 	c.Assert(formatted, Equals,
-		`Spec Heading
-============
-Scenario Heading
-----------------
+		`# Spec Heading
+## Scenario Heading
 * Example step
 * Step with inline table`+" "+`
 
-     |id |name|
-     |---|----|
-     |<1>|foo |
-     |2  |bar |
+   |id |name|
+   |---|----|
+   |<1>|foo |
+   |2  |bar |
 `)
 }
 
 func (s *MySuite) TestFormatTable(c *C) {
-	cell1 := gauge.TableCell{"john", gauge.Static}
-	cell2 := gauge.TableCell{"doe", gauge.Static}
+	cell1 := gauge.TableCell{Value: "john", CellType: gauge.Static}
+	cell2 := gauge.TableCell{Value: "doe", CellType: gauge.Static}
 
 	headers := []string{"name1", "name2"}
 	cols := [][]gauge.TableCell{{cell1}, {cell2}}
@@ -72,9 +73,9 @@ func (s *MySuite) TestFormatTable(c *C) {
 
 	got := FormatTable(table)
 	want := `
-     |name1|name2|
-     |-----|-----|
-     |john |doe  |
+   |name1|name2|
+   |-----|-----|
+   |john |doe  |
 `
 
 	c.Assert(got, Equals, want)
@@ -108,22 +109,59 @@ func (s *MySuite) TestFormatSpecificationWithTags(c *C) {
 		&parser.Token{Kind: gauge.StepKind, Value: "Example step", LineNo: 8, LineText: "Example step"},
 	}
 
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	formatted := FormatSpecification(spec)
 	c.Assert(formatted, Equals,
-		`My Spec Heading
-===============
+		`# My Spec Heading
+
 tags: tag1, tag2
-Scenario Heading
-----------------
+
+## Scenario Heading
+
 tags: tag3, tag4
+
 * Example step
-Scenario Heading1
------------------
+## Scenario Heading1
+
 tags: tag3, tag4
+
 * Example step
 `)
 
+}
+
+func (s *MySuite) TestFormatSpecificationWithTagsInMutipleLines(c *C) {
+	tokens := []*parser.Token{
+		&parser.Token{Kind: gauge.SpecKind, Value: "My Spec Heading", LineNo: 1},
+		&parser.Token{Kind: gauge.TagKind, Args: []string{"tag1", "tag2"}, LineNo: 2},
+		&parser.Token{Kind: gauge.TagKind, Args: []string{"tag3", "tag4"}, LineNo: 3},
+		&parser.Token{Kind: gauge.TagKind, Args: []string{"tag5"}, LineNo: 4},
+		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading", LineNo: 5},
+		&parser.Token{Kind: gauge.TagKind, Args: []string{"tag3", "tag4"}, LineNo: 6},
+		&parser.Token{Kind: gauge.StepKind, Value: "Example step", LineNo: 7, LineText: "Example step"},
+		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading1", LineNo: 8},
+		&parser.Token{Kind: gauge.TagKind, Args: []string{"tag3", "tag4"}, LineNo: 9},
+		&parser.Token{Kind: gauge.StepKind, Value: "Example step", LineNo: 10, LineText: "Example step"},
+	}
+
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	formatted := FormatSpecification(spec)
+	c.Assert(formatted, Equals,
+		`# My Spec Heading
+
+tags: tag1, tag2,`+string(" \n      ")+`tag3, tag4,`+string(" \n      ")+`tag5
+
+## Scenario Heading
+
+tags: tag3, tag4
+
+* Example step
+## Scenario Heading1
+
+tags: tag3, tag4
+
+* Example step
+`)
 }
 
 func (s *MySuite) TestFormatSpecificationWithTeardownSteps(c *C) {
@@ -141,19 +179,22 @@ func (s *MySuite) TestFormatSpecificationWithTeardownSteps(c *C) {
 		&parser.Token{Kind: gauge.StepKind, Value: "Example step2", LineNo: 11, LineText: "Example step2"},
 	}
 
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	formatted := FormatSpecification(spec)
 	c.Assert(formatted, Equals,
-		`My Spec Heading
-===============
+		`# My Spec Heading
+
 tags: tag1, tag2
-Scenario Heading
-----------------
+
+## Scenario Heading
+
 tags: tag3, tag4
+
 * Example step
-Scenario Heading1
------------------
+## Scenario Heading1
+
 tags: tag3, tag4
+
 * Example step
 ____
 * Example step1
@@ -164,32 +205,80 @@ ____
 
 func (s *MySuite) TestFormatStep(c *C) {
 	step := &gauge.Step{Value: "my step with {}, {}, {} and {}", Args: []*gauge.StepArg{&gauge.StepArg{Value: "static \"foo\"", ArgType: gauge.Static},
-		&gauge.StepArg{Value: "dynamic \"foo\"", ArgType: gauge.Dynamic},
+		&gauge.StepArg{Name: "dynamic", Value: "\"foo\"", ArgType: gauge.Dynamic},
 		&gauge.StepArg{Name: "file:user\".txt", ArgType: gauge.SpecialString},
 		&gauge.StepArg{Name: "table :hell\".csv", ArgType: gauge.SpecialTable}}}
 	formatted := FormatStep(step)
-	c.Assert(formatted, Equals, `* my step with "static \"foo\"", <dynamic \"foo\">, <file:user\".txt> and <table :hell\".csv>
+	c.Assert(formatted, Equals, `* my step with "static \"foo\"", <dynamic>, <file:user\".txt> and <table :hell\".csv>
+`)
+}
+
+func (s *MySuite) TestFormatStepsWithResolveArgs(c *C) {
+	step := &gauge.Step{Value: "my step with {}, {}", Args: []*gauge.StepArg{&gauge.StepArg{Value: "static \"foo\"", ArgType: gauge.Static},
+		&gauge.StepArg{Name: "dynamic", Value: "\"foo\"", ArgType: gauge.Static}},
+		Fragments: []*gauge_messages.Fragment{
+			&gauge_messages.Fragment{Text: "my step with "},
+			&gauge_messages.Fragment{FragmentType: gauge_messages.Fragment_Parameter, Parameter: &gauge_messages.Parameter{Value: "static \"foo\"", ParameterType: gauge_messages.Parameter_Static}},
+			&gauge_messages.Fragment{Text: ", "},
+			&gauge_messages.Fragment{FragmentType: gauge_messages.Fragment_Parameter, Parameter: &gauge_messages.Parameter{Value: "\"foo\"", ParameterType: gauge_messages.Parameter_Static}}}}
+	formatted := FormatStepWithResolvedArgs(step)
+	c.Assert(formatted, Equals, `* my step with "static "foo"", ""foo""
+`)
+}
+
+func (s *MySuite) TestFormatStepsWithResolveArgsWithConcept(c *C) {
+	step := &gauge.Step{Value: "my step with {}, {}", Args: []*gauge.StepArg{&gauge.StepArg{Value: "static \"foo\"", ArgType: gauge.Dynamic},
+		&gauge.StepArg{Name: "dynamic", Value: "\"foo\"", ArgType: gauge.Static}},
+		Fragments: []*gauge_messages.Fragment{
+			&gauge_messages.Fragment{Text: "my step with "},
+			&gauge_messages.Fragment{FragmentType: gauge_messages.Fragment_Parameter, Parameter: &gauge_messages.Parameter{Value: "static \"foo\"", ParameterType: gauge_messages.Parameter_Dynamic}},
+			&gauge_messages.Fragment{Text: ", "},
+			&gauge_messages.Fragment{FragmentType: gauge_messages.Fragment_Parameter, Parameter: &gauge_messages.Parameter{Value: "\"foo\"", ParameterType: gauge_messages.Parameter_Static}}}}
+	formatted := FormatStepWithResolvedArgs(step)
+	c.Assert(formatted, Equals, `* my step with "static "foo"", ""foo""
+`)
+}
+
+func (s *MySuite) TestFormatStepsWithResolveArgsWithSpecialArguments(c *C) {
+	step := &gauge.Step{Value: "my step with {}, {}", Args: []*gauge.StepArg{&gauge.StepArg{Value: "static \"foo\"", ArgType: gauge.SpecialString},
+		&gauge.StepArg{Name: "dynamic", Value: "\"foo\"", ArgType: gauge.SpecialTable}},
+		Fragments: []*gauge_messages.Fragment{
+			&gauge_messages.Fragment{Text: "my step with "},
+			&gauge_messages.Fragment{FragmentType: gauge_messages.Fragment_Parameter, Parameter: &gauge_messages.Parameter{Value: "static \"foo\"", ParameterType: gauge_messages.Parameter_Special_String}},
+			&gauge_messages.Fragment{Text: ", "},
+			&gauge_messages.Fragment{FragmentType: gauge_messages.Fragment_Parameter, Parameter: &gauge_messages.Parameter{Value: "\"foo\"", ParameterType: gauge_messages.Parameter_Special_Table}}}}
+	formatted := FormatStepWithResolvedArgs(step)
+	c.Assert(formatted, Equals, `* my step with "static "foo"", ""foo""
 `)
 }
 
 func (s *MySuite) TestFormattingWithTableAsAComment(c *C) {
 	tokens := []*parser.Token{
 		&parser.Token{Kind: gauge.SpecKind, Value: "My Spec Heading", LineNo: 1},
+		&parser.Token{Kind: gauge.CommentKind, Value: "\n", LineNo: 2},
 		&parser.Token{Kind: gauge.ScenarioKind, Value: "Scenario Heading", LineNo: 3},
 		&parser.Token{Kind: gauge.TableHeader, Args: []string{"id", "name"}, LineText: " |id|name|"},
 		&parser.Token{Kind: gauge.TableRow, Args: []string{"1", "foo"}, LineText: " |1|foo|"},
 		&parser.Token{Kind: gauge.TableRow, Args: []string{"2", "bar"}, LineText: "|2|bar|"},
-		&parser.Token{Kind: gauge.StepKind, Value: "Example step", LineNo: 5, LineText: "Example step"},
+		&parser.Token{Kind: gauge.CommentKind, Value: "\n", LineNo: 7},
+		&parser.Token{Kind: gauge.TableHeader, Args: []string{"id", "name"}, LineText: " |id|name1|"},
+		&parser.Token{Kind: gauge.TableRow, Args: []string{"1", "foo"}, LineText: " |1|foo|"},
+		&parser.Token{Kind: gauge.TableRow, Args: []string{"2", "bar"}, LineText: "|2|bar|"},
+		&parser.Token{Kind: gauge.StepKind, Value: "Example step", LineNo: 11, LineText: "Example step"},
 	}
 
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	formatted := FormatSpecification(spec)
 	c.Assert(formatted, Equals,
-		`My Spec Heading
-===============
-Scenario Heading
-----------------
- |id|name|
+		`# My Spec Heading
+
+## Scenario Heading
+   |id|name|
+   |--|----|
+   |1 |foo |
+   |2 |bar |
+
+ |id|name1|
  |1|foo|
 |2|bar|
 * Example step
@@ -209,25 +298,23 @@ func (s *MySuite) TestFormatSpecificationWithTableContainingDynamicParameters(c 
 		&parser.Token{Kind: gauge.TableRow, Args: []string{"2", "bar"}},
 	}
 
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 
 	formatted := FormatSpecification(spec)
 
 	c.Assert(formatted, Equals,
-		`Spec Heading
-============
-     |id|foo|
-     |--|---|
-     |1 |f  |
-Scenario Heading
-----------------
+		`# Spec Heading
+   |id|foo|
+   |--|---|
+   |1 |f  |
+## Scenario Heading
 * Example step
-* Step with inline table `+`
+* Step with inline table 
 
-     |id|name |
-     |--|-----|
-     |1 |<foo>|
-     |2 |bar  |
+   |id|name |
+   |--|-----|
+   |1 |<foo>|
+   |2 |bar  |
 `)
 }
 
@@ -246,24 +333,24 @@ func (s *MySuite) TestFormatShouldRetainNewlines(c *C) {
 		&parser.Token{Kind: gauge.TableRow, Args: []string{"2", "bar"}},
 	}
 
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	env.AllowScenarioDatatable = func() bool { return true }
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	formatted := FormatSpecification(spec)
 	c.Assert(formatted, Equals,
-		`My Spec Heading
-===============
+		`# My Spec Heading
 
 
-Scenario Heading
-----------------
- |id|name|
- |1|foo|
-|2|bar|
-* Example step `+`
+## Scenario Heading
+   |id|name|
+   |--|----|
+   |1 |foo |
+   |2 |bar |
+* Example step 
 
-     |id|name |
-     |--|-----|
-     |1 |<foo>|
-     |2 |bar  |
+   |id|name |
+   |--|-----|
+   |1 |<foo>|
+   |2 |bar  |
 `)
 }
 
@@ -275,13 +362,11 @@ func (s *MySuite) TestFormatShouldRetainNewlinesBetweenSteps(c *C) {
 		&parser.Token{Kind: gauge.StepKind, Value: "Example step", LineNo: 9, LineText: "Example step", Suffix: "\n\n"},
 	}
 
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	formatted := FormatSpecification(spec)
 	c.Assert(formatted, Equals,
-		`My Spec Heading
-===============
-Scenario Heading
-----------------
+		`# My Spec Heading
+## Scenario Heading
 * Example step
 
 
@@ -306,24 +391,23 @@ func (s *MySuite) TestFormatShouldStripDuplicateNewlinesBeforeInlineTable(c *C) 
 		&parser.Token{Kind: gauge.TableRow, Args: []string{"2", "bar"}},
 	}
 
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	formatted := FormatSpecification(spec)
 	c.Assert(formatted, Equals,
-		`My Spec Heading
-===============
+		`# My Spec Heading
 
 
-Scenario Heading
-----------------
- |id|name|
- |1|foo|
-|2|bar|
-* Example step `+`
+## Scenario Heading
+   |id|name|
+   |--|----|
+   |1 |foo |
+   |2 |bar |
+* Example step 
 
-     |id|name |
-     |--|-----|
-     |1 |<foo>|
-     |2 |bar  |
+   |id|name |
+   |--|-----|
+   |1 |<foo>|
+   |2 |bar  |
 `)
 }
 
@@ -349,39 +433,37 @@ func (s *MySuite) TestFormatShouldStripDuplicateNewlinesBeforeInlineTableInTeard
 		&parser.Token{Kind: gauge.TableRow, Args: []string{"2", "bar"}},
 	}
 
-	spec, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).CreateSpecification(tokens, gauge.NewConceptDictionary(), "")
 	formatted := FormatSpecification(spec)
 	c.Assert(formatted, Equals,
-		`My Spec Heading
-===============
+		`# My Spec Heading
 
 
-Scenario Heading
-----------------
- |id|name|
- |1|foo|
-|2|bar|
-* Example step `+`
+## Scenario Heading
+   |id|name|
+   |--|----|
+   |1 |foo |
+   |2 |bar |
+* Example step 
 
-     |id|name |
-     |--|-----|
-     |1 |<foo>|
-     |2 |bar  |
+   |id|name |
+   |--|-----|
+   |1 |<foo>|
+   |2 |bar  |
 
 ____
 
-* Example step `+`
+* Example step 
 
-     |id|name |
-     |--|-----|
-     |1 |<foo>|
-     |2 |bar  |
+   |id|name |
+   |--|-----|
+   |1 |<foo>|
+   |2 |bar  |
 `)
 }
 
 func (s *MySuite) TestFormatShouldNotAddExtraNewLinesBeforeDataTable(c *C) {
-	spec, _ := new(parser.SpecParser).Parse(`Specification Heading
-=====================
+	spec, _, _ := new(parser.SpecParser).Parse(`# Specification Heading
 
      |Word  |Vowel Count|
      |------|-----------|
@@ -393,15 +475,14 @@ func (s *MySuite) TestFormatShouldNotAddExtraNewLinesBeforeDataTable(c *C) {
 `, gauge.NewConceptDictionary(), "")
 	formatted := FormatSpecification(spec)
 	c.Assert(formatted, Equals,
-		`Specification Heading
-=====================
+		`# Specification Heading
 
-     |Word  |Vowel Count|
-     |------|-----------|
-     |Gauge |3          |
-     |Mingle|2          |
-     |Snap  |1          |
-     |GoCD  |1          |
-     |Rhythm|0          |
+   |Word  |Vowel Count|
+   |------|-----------|
+   |Gauge |3          |
+   |Mingle|2          |
+   |Snap  |1          |
+   |GoCD  |1          |
+   |Rhythm|0          |
 `)
 }

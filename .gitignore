@@ -31,10 +31,26 @@ deploy
 _workspace/
 count.out
 gauge.iml
+.vscode
 
 /Gemfile
 /env/default/
 /manifest.json
 /specs/
 /step_implementations/
-skel/skel.go
+_man/
+_insights
+.DS_Store
+
+# Compiled python modules.
+*.pyc
+
+# Setuptools distribution folder.
+dist/
+
+# Python egg metadata, regenerated from source files by setuptools.
+*.egg-info
+*.egg
+*.zip
+build/pip/setup.py
+.eggs

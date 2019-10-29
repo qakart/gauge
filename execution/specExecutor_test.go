@@ -20,7 +20,6 @@ package execution
 import (
 	"fmt"
 	"net"
-	"path/filepath"
 	"testing"
 
 	"sync"
@@ -38,7 +37,7 @@ type specBuilder struct {
 	lines []string
 }
 
-func SpecBuilder() *specBuilder {
+func newSpecBuilder() *specBuilder {
 	return &specBuilder{lines: make([]string, 0)}
 }
 
@@ -72,19 +71,6 @@ func (specBuilder *specBuilder) step(stepText string) *specBuilder {
 	return specBuilder
 }
 
-func (specBuilder *specBuilder) tags(tags ...string) *specBuilder {
-	tagText := ""
-	for i, tag := range tags {
-		tagText = fmt.Sprintf("%s%s", tagText, tag)
-		if i != len(tags)-1 {
-			tagText = fmt.Sprintf("%s,", tagText)
-		}
-	}
-	line := specBuilder.addPrefix("tags: ", tagText)
-	specBuilder.lines = append(specBuilder.lines, line)
-	return specBuilder
-}
-
 func (specBuilder *specBuilder) tableHeader(cells ...string) *specBuilder {
 	return specBuilder.tableRow(cells...)
 }
@@ -95,145 +81,6 @@ func (specBuilder *specBuilder) tableRow(cells ...string) *specBuilder {
 	}
 	specBuilder.lines = append(specBuilder.lines, fmt.Sprintf("%s\n", rowInMarkdown))
 	return specBuilder
-}
-
-func (specBuilder *specBuilder) text(comment string) *specBuilder {
-	specBuilder.lines = append(specBuilder.lines, fmt.Sprintf("%s\n", comment))
-	return specBuilder
-}
-
-func (s *MySuite) TestResolveConceptToProtoConceptItem(c *C) {
-	conceptDictionary := gauge.NewConceptDictionary()
-
-	specText := SpecBuilder().specHeading("A spec heading").
-		scenarioHeading("First scenario").
-		step("create user \"456\" \"foo\" and \"9900\"").
-		String()
-	path, _ := filepath.Abs(filepath.Join("testdata", "concept.cpt"))
-	parser.AddConcepts(path, conceptDictionary)
-
-	spec, _ := new(parser.SpecParser).Parse(specText, conceptDictionary, "")
-
-	specExecutor := newSpecExecutor(spec, nil, nil, nil, 0)
-	specExecutor.errMap = getValidationErrorMap()
-	protoConcept := specExecutor.resolveToProtoConceptItem(*spec.Scenarios[0].Steps[0]).GetConcept()
-
-	checkConceptParameterValuesInOrder(c, protoConcept, "456", "foo", "9900")
-	firstNestedStep := protoConcept.GetSteps()[0].GetConcept().GetSteps()[0].GetStep()
-	params := getParameters(firstNestedStep.GetFragments())
-	c.Assert(1, Equals, len(params))
-	c.Assert(params[0].GetParameterType(), Equals, gauge_messages.Parameter_Dynamic)
-	c.Assert(params[0].GetValue(), Equals, "456")
-
-	secondNestedStep := protoConcept.GetSteps()[0].GetConcept().GetSteps()[1].GetStep()
-	params = getParameters(secondNestedStep.GetFragments())
-	c.Assert(1, Equals, len(params))
-	c.Assert(params[0].GetParameterType(), Equals, gauge_messages.Parameter_Dynamic)
-	c.Assert(params[0].GetValue(), Equals, "foo")
-
-	secondStep := protoConcept.GetSteps()[1].GetStep()
-	params = getParameters(secondStep.GetFragments())
-	c.Assert(1, Equals, len(params))
-	c.Assert(params[0].GetParameterType(), Equals, gauge_messages.Parameter_Dynamic)
-	c.Assert(params[0].GetValue(), Equals, "9900")
-
-}
-
-func (s *MySuite) TestResolveNestedConceptToProtoConceptItem(c *C) {
-	conceptDictionary := gauge.NewConceptDictionary()
-
-	specText := SpecBuilder().specHeading("A spec heading").
-		scenarioHeading("First scenario").
-		step("create user \"456\" \"foo\" and \"9900\"").
-		String()
-
-	path, _ := filepath.Abs(filepath.Join("testdata", "concept.cpt"))
-	parser.AddConcepts(path, conceptDictionary)
-	specParser := new(parser.SpecParser)
-	spec, _ := specParser.Parse(specText, conceptDictionary, "")
-
-	specExecutor := newSpecExecutor(spec, nil, nil, nil, 0)
-	specExecutor.errMap = getValidationErrorMap()
-	protoConcept := specExecutor.resolveToProtoConceptItem(*spec.Scenarios[0].Steps[0]).GetConcept()
-	checkConceptParameterValuesInOrder(c, protoConcept, "456", "foo", "9900")
-
-	c.Assert(protoConcept.GetSteps()[0].GetItemType(), Equals, gauge_messages.ProtoItem_Concept)
-
-	nestedConcept := protoConcept.GetSteps()[0].GetConcept()
-	checkConceptParameterValuesInOrder(c, nestedConcept, "456", "foo")
-
-	firstNestedStep := nestedConcept.GetSteps()[0].GetStep()
-	params := getParameters(firstNestedStep.GetFragments())
-	c.Assert(1, Equals, len(params))
-	c.Assert(params[0].GetParameterType(), Equals, gauge_messages.Parameter_Dynamic)
-	c.Assert(params[0].GetValue(), Equals, "456")
-
-	secondNestedStep := nestedConcept.GetSteps()[1].GetStep()
-	params = getParameters(secondNestedStep.GetFragments())
-	c.Assert(1, Equals, len(params))
-	c.Assert(params[0].GetParameterType(), Equals, gauge_messages.Parameter_Dynamic)
-	c.Assert(params[0].GetValue(), Equals, "foo")
-
-	c.Assert(protoConcept.GetSteps()[1].GetItemType(), Equals, gauge_messages.ProtoItem_Step)
-	secondStepInConcept := protoConcept.GetSteps()[1].GetStep()
-	params = getParameters(secondStepInConcept.GetFragments())
-	c.Assert(1, Equals, len(params))
-	c.Assert(params[0].GetParameterType(), Equals, gauge_messages.Parameter_Dynamic)
-	c.Assert(params[0].GetValue(), Equals, "9900")
-
-}
-
-func (s *MySuite) TestResolveToProtoConceptItemWithDataTable(c *C) {
-	conceptDictionary := gauge.NewConceptDictionary()
-
-	specText := SpecBuilder().specHeading("A spec heading").
-		tableHeader("id", "name", "phone").
-		tableHeader("123", "foo", "8800").
-		tableHeader("666", "bar", "9900").
-		scenarioHeading("First scenario").
-		step("create user <id> <name> and <phone>").
-		String()
-
-	path, _ := filepath.Abs(filepath.Join("testdata", "concept.cpt"))
-	parser.AddConcepts(path, conceptDictionary)
-	specParser := new(parser.SpecParser)
-	spec, _ := specParser.Parse(specText, conceptDictionary, "")
-
-	specExecutor := newSpecExecutor(spec, nil, nil, nil, 0)
-
-	specExecutor.errMap = gauge.NewBuildErrors()
-	protoConcept := specExecutor.resolveToProtoConceptItem(*spec.Scenarios[0].Steps[0]).GetConcept()
-	checkConceptParameterValuesInOrder(c, protoConcept, "123", "foo", "8800")
-
-	c.Assert(protoConcept.GetSteps()[0].GetItemType(), Equals, gauge_messages.ProtoItem_Concept)
-	nestedConcept := protoConcept.GetSteps()[0].GetConcept()
-	checkConceptParameterValuesInOrder(c, nestedConcept, "123", "foo")
-	firstNestedStep := nestedConcept.GetSteps()[0].GetStep()
-	params := getParameters(firstNestedStep.GetFragments())
-	c.Assert(1, Equals, len(params))
-	c.Assert(params[0].GetParameterType(), Equals, gauge_messages.Parameter_Dynamic)
-	c.Assert(params[0].GetValue(), Equals, "123")
-
-	secondNestedStep := nestedConcept.GetSteps()[1].GetStep()
-	params = getParameters(secondNestedStep.GetFragments())
-	c.Assert(1, Equals, len(params))
-	c.Assert(params[0].GetParameterType(), Equals, gauge_messages.Parameter_Dynamic)
-	c.Assert(params[0].GetValue(), Equals, "foo")
-
-	c.Assert(protoConcept.GetSteps()[1].GetItemType(), Equals, gauge_messages.ProtoItem_Step)
-	secondStepInConcept := protoConcept.GetSteps()[1].GetStep()
-	params = getParameters(secondStepInConcept.GetFragments())
-	c.Assert(1, Equals, len(params))
-	c.Assert(params[0].GetParameterType(), Equals, gauge_messages.Parameter_Dynamic)
-	c.Assert(params[0].GetValue(), Equals, "8800")
-}
-
-func checkConceptParameterValuesInOrder(c *C, concept *gauge_messages.ProtoConcept, paramValues ...string) {
-	params := getParameters(concept.GetConceptStep().Fragments)
-	c.Assert(len(params), Equals, len(paramValues))
-	for i, param := range params {
-		c.Assert(param.GetValue(), Equals, paramValues[i])
-	}
 }
 
 type tableRow struct {
@@ -268,6 +115,7 @@ func (s *MySuite) TestCreateSkippedSpecResult(c *C) {
 
 	c.Assert(se.specResult.IsFailed, Equals, false)
 	c.Assert(se.specResult.Skipped, Equals, true)
+	c.Assert(len(se.errMap.SpecErrs[spec]), Equals, 1)
 }
 
 func (s *MySuite) TestCreateSkippedSpecResultWithScenarios(c *C) {
@@ -276,55 +124,18 @@ func (s *MySuite) TestCreateSkippedSpecResultWithScenarios(c *C) {
 	se.specResult = &result.SpecResult{ProtoSpec: &gauge_messages.ProtoSpec{}}
 	se.skipSpecForError(fmt.Errorf("ERROR"))
 
-	c.Assert(se.specResult.IsFailed, Equals, false)
-	c.Assert(se.specResult.Skipped, Equals, true)
-}
-
-func (s *MySuite) TestSkipSpecWithDataTableScenarios(c *C) {
-	stepText := "Unimplememted step"
-
-	specText := SpecBuilder().specHeading("A spec heading").
-		tableHeader("id", "name", "phone").
-		tableRow("123", "foo", "8800").
-		tableRow("666", "bar", "9900").
-		scenarioHeading("First scenario").
-		step(stepText).
-		step("create user <id> <name> and <phone>").
-		String()
-
-	spec, _ := new(parser.SpecParser).Parse(specText, gauge.NewConceptDictionary(), "")
-
-	errMap := &gauge.BuildErrors{
-		SpecErrs:     make(map[*gauge.Specification][]error),
-		ScenarioErrs: make(map[*gauge.Scenario][]error),
-		StepErrs:     make(map[*gauge.Step]error),
-	}
-
-	errMap.SpecErrs[spec] = []error{validation.NewSpecValidationError("Step implementation not found", spec.FileName)}
-	se := newSpecExecutor(spec, nil, nil, errMap, 0)
-	specInfo := &gauge_messages.SpecInfo{Name: se.specification.Heading.Value,
-		FileName: se.specification.FileName,
-		IsFailed: false, Tags: getTagValue(se.specification.Tags)}
-	se.currentExecutionInfo = &gauge_messages.ExecutionInfo{CurrentSpec: specInfo}
-	se.specResult = gauge.NewSpecResult(se.specification)
-	resolvedSpecItems := se.resolveItems(se.specification.GetSpecItems())
-	se.specResult.AddSpecItems(resolvedSpecItems)
-
-	se.skipSpec()
-
-	c.Assert(se.specResult.ProtoSpec.GetIsTableDriven(), Equals, true)
-	c.Assert(len(se.specResult.ProtoSpec.GetItems()), Equals, 3)
-
+	c.Assert(len(se.errMap.ScenarioErrs[se.specification.Scenarios[0]]), Equals, 1)
+	c.Assert(len(se.errMap.SpecErrs[se.specification]), Equals, 1)
 }
 
 func anySpec() *gauge.Specification {
 
-	specText := SpecBuilder().specHeading("A spec heading").
+	specText := newSpecBuilder().specHeading("A spec heading").
 		scenarioHeading("First scenario").
 		step("create user \"456\" \"foo\" and \"9900\"").
 		String()
 
-	spec, _ := new(parser.SpecParser).Parse(specText, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).Parse(specText, gauge.NewConceptDictionary(), "")
 	spec.FileName = "FILE"
 	return spec
 }
@@ -339,14 +150,15 @@ func (s *MySuite) TestSpecIsSkippedIfDataRangeIsInvalid(c *C) {
 	errMap.SpecErrs[spec] = []error{validation.NewSpecValidationError("Table row number out of range", spec.FileName)}
 	se := newSpecExecutor(spec, nil, nil, errMap, 0)
 
-	specResult := se.execute(true, true, true)
+	specResult := se.execute(true, false, false)
 	c.Assert(specResult.Skipped, Equals, true)
 }
 
 func (s *MySuite) TestDataTableRowsAreSkippedForUnimplemetedStep(c *C) {
+	MaxRetriesCount = 1
 	stepText := "Unimplememted step"
 
-	specText := SpecBuilder().specHeading("A spec heading").
+	specText := newSpecBuilder().specHeading("A spec heading").
 		tableHeader("id", "name", "phone").
 		tableRow("123", "foo", "8800").
 		tableRow("666", "bar", "9900").
@@ -355,7 +167,7 @@ func (s *MySuite) TestDataTableRowsAreSkippedForUnimplemetedStep(c *C) {
 		step("create user <id> <name> and <phone>").
 		String()
 
-	spec, _ := new(parser.SpecParser).Parse(specText, gauge.NewConceptDictionary(), "")
+	spec, _, _ := new(parser.SpecParser).Parse(specText, gauge.NewConceptDictionary(), "")
 
 	errMap := &gauge.BuildErrors{
 		SpecErrs:     make(map[*gauge.Specification][]error),
@@ -364,6 +176,7 @@ func (s *MySuite) TestDataTableRowsAreSkippedForUnimplemetedStep(c *C) {
 	}
 
 	errMap.SpecErrs[spec] = []error{validation.NewSpecValidationError("Step implementation not found", spec.FileName)}
+	errMap.ScenarioErrs[spec.Scenarios[0]] = []error{validation.NewSpecValidationError("Step implementation not found", spec.FileName)}
 	se := newSpecExecutor(spec, nil, nil, errMap, 0)
 
 	specResult := se.execute(true, true, true)
@@ -407,7 +220,7 @@ func (s *MySuite) TestConvertSpecValidationErrorToGaugeMessagesError(c *C) {
 
 func (s *MySuite) TestConvertStepValidationErrorToGaugeMessagesError(c *C) {
 	spec := &gauge.Specification{Heading: &gauge.Heading{LineNo: 0, Value: "SPEC_HEADING"}, FileName: "FILE"}
-	e := validation.NewStepValidationError(&gauge.Step{LineText: "step", LineNo: 3}, "Step Message", "filename", nil)
+	e := validation.NewStepValidationError(&gauge.Step{LineText: "step", LineNo: 3}, "Step Message", "filename", nil, "")
 	se := newSpecExecutor(spec, nil, nil, nil, 0)
 
 	errs := se.convertErrors([]error{e})
@@ -425,11 +238,14 @@ type mockRunner struct {
 	ExecuteAndGetStatusFunc func(m *gauge_messages.Message) *gauge_messages.ProtoExecutionResult
 }
 
+func (r *mockRunner) ExecuteMessageWithTimeout(m *gauge_messages.Message) (*gauge_messages.Message, error) {
+	return nil, nil
+}
 func (r *mockRunner) ExecuteAndGetStatus(m *gauge_messages.Message) *gauge_messages.ProtoExecutionResult {
 	return r.ExecuteAndGetStatusFunc(m)
 }
 
-func (r *mockRunner) IsProcessRunning() bool {
+func (r *mockRunner) Alive() bool {
 	return false
 }
 
@@ -462,6 +278,10 @@ func (h *mockPluginHandler) GracefullyKillPlugins() {
 	h.GracefullyKillPluginsfunc()
 }
 
+func (h *mockPluginHandler) ExtendTimeout(id string) {
+
+}
+
 var exampleSpec = &gauge.Specification{Heading: &gauge.Heading{Value: "Example Spec"}, FileName: "example.spec", Tags: &gauge.Tags{}}
 
 var exampleSpecWithScenarios = &gauge.Specification{
@@ -482,7 +302,7 @@ func TestExecuteFailsWhenSpecHasParseErrors(t *testing.T) {
 	res := se.execute(false, true, false)
 
 	if !res.GetFailed() {
-		t.Errorf("Expected result.Failed=true, got %s", res.GetFailed())
+		t.Errorf("Expected result.Failed=true, got %t", res.GetFailed())
 	}
 
 	c := len(res.Errors)
@@ -499,23 +319,7 @@ func TestExecuteSkipsWhenSpecHasErrors(t *testing.T) {
 	res := se.execute(false, true, false)
 
 	if !res.Skipped {
-		t.Errorf("Expected result.Skipped=true, got %s", res.Skipped)
-	}
-}
-
-func TestExecuteSkipsWhenSpecHasNoScenario(t *testing.T) {
-	errs := gauge.NewBuildErrors()
-	se := newSpecExecutor(exampleSpec, nil, nil, errs, 0)
-
-	res := se.execute(false, true, false)
-
-	if !res.Skipped {
-		t.Errorf("Expected result.Skipped=true, got %s", res.Skipped)
-	}
-	e := res.Errors[0]
-	expected := "example.spec:0 No scenarios found in spec => 'Example Spec'"
-	if e.Message != expected {
-		t.Errorf("Expected error with message : '%s', got '%s'", expected, e.Message)
+		t.Errorf("Expected result.Skipped=true, got %t", res.Skipped)
 	}
 }
 
@@ -568,7 +372,7 @@ func TestExecuteSkipsWhenSpecDatastoreInitFails(t *testing.T) {
 	res := se.execute(true, false, false)
 
 	if !res.Skipped {
-		t.Errorf("Expected result.Skipped=true, got %s", res.Skipped)
+		t.Errorf("Expected result.Skipped=true, got %t", res.Skipped)
 	}
 
 	e := res.Errors[0]
@@ -608,7 +412,7 @@ func TestExecuteShouldNotifyBeforeSpecEvent(t *testing.T) {
 		return &gauge_messages.ProtoExecutionResult{}
 	}
 
-	ch := make(chan event.ExecutionEvent, 0)
+	ch := make(chan event.ExecutionEvent)
 	event.InitRegistry()
 	event.Register(ch, event.SpecStart)
 	wg := &sync.WaitGroup{}
@@ -631,6 +435,7 @@ func TestExecuteShouldNotifyBeforeSpecEvent(t *testing.T) {
 	if !eventRaised {
 		t.Error("Expected SpecStart event to be raised")
 	}
+	event.InitRegistry()
 }
 func TestExecuteAfterSpecHook(t *testing.T) {
 	errs := gauge.NewBuildErrors()
@@ -652,6 +457,94 @@ func TestExecuteAfterSpecHook(t *testing.T) {
 	}
 }
 
+func TestExecuteAddsSpecHookExecutionMessages(t *testing.T) {
+	errs := gauge.NewBuildErrors()
+	mockRunner := &mockRunner{}
+	mockHandler := &mockPluginHandler{NotifyPluginsfunc: func(m *gauge_messages.Message) {}, GracefullyKillPluginsfunc: func() {}}
+
+	mockRunner.ExecuteAndGetStatusFunc = func(m *gauge_messages.Message) *gauge_messages.ProtoExecutionResult {
+		if m.MessageType == gauge_messages.Message_SpecExecutionEnding {
+			return &gauge_messages.ProtoExecutionResult{
+				Message:       []string{"After Spec Called"},
+				Failed:        false,
+				ExecutionTime: 10,
+			}
+		} else if m.MessageType == gauge_messages.Message_SpecExecutionStarting {
+			return &gauge_messages.ProtoExecutionResult{
+				Message:       []string{"Before Spec Called"},
+				Failed:        false,
+				ExecutionTime: 10,
+			}
+		}
+		return &gauge_messages.ProtoExecutionResult{}
+	}
+	se := newSpecExecutor(exampleSpec, mockRunner, mockHandler, errs, 0)
+	se.execute(true, false, true)
+
+	gotPreHookMessages := se.specResult.ProtoSpec.PreHookMessages
+	gotPostHookMessages := se.specResult.ProtoSpec.PostHookMessages
+
+	if len(gotPreHookMessages) != 1 {
+		t.Errorf("Expected 1 message, got : %d", len(gotPreHookMessages))
+	}
+	if gotPreHookMessages[0] != "Before Spec Called" {
+		t.Errorf("Expected `Before Spec Called` message, got : %s", gotPreHookMessages[0])
+	}
+	if len(gotPostHookMessages) != 1 {
+		t.Errorf("Expected 1 message, got : %d", len(gotPostHookMessages))
+	}
+	if gotPostHookMessages[0] != "After Spec Called" {
+		t.Errorf("Expected `After Spec Called` message, got : %s", gotPostHookMessages[0])
+	}
+}
+
+func TestExecuteAddsSpecHookExecutionScreenshots(t *testing.T) {
+	errs := gauge.NewBuildErrors()
+	mockRunner := &mockRunner{}
+	mockHandler := &mockPluginHandler{NotifyPluginsfunc: func(m *gauge_messages.Message) {}, GracefullyKillPluginsfunc: func() {}}
+
+	mockRunner.ExecuteAndGetStatusFunc = func(m *gauge_messages.Message) *gauge_messages.ProtoExecutionResult {
+		if m.MessageType == gauge_messages.Message_SpecExecutionEnding {
+			return &gauge_messages.ProtoExecutionResult{
+				Screenshots:   [][]byte{[]byte("screenshot1"), []byte("screenshot2")},
+				Failed:        false,
+				ExecutionTime: 10,
+			}
+		} else if m.MessageType == gauge_messages.Message_SpecExecutionStarting {
+			return &gauge_messages.ProtoExecutionResult{
+				Screenshots:   [][]byte{[]byte("screenshot3"), []byte("screenshot4")},
+				Failed:        false,
+				ExecutionTime: 10,
+			}
+		}
+		return &gauge_messages.ProtoExecutionResult{}
+	}
+	se := newSpecExecutor(exampleSpec, mockRunner, mockHandler, errs, 0)
+	se.execute(true, false, true)
+
+	beforeSpecScreenshots := se.specResult.ProtoSpec.PreHookScreenshots
+	afterSpecScreenshots := se.specResult.ProtoSpec.PostHookScreenshots
+	expectedAfterSpecScreenshots := []string{"screenshot1", "screenshot2"}
+	expectedBeforeSpecScreenshots := []string{"screenshot3", "screenshot4"}
+
+	if len(beforeSpecScreenshots) != len(expectedBeforeSpecScreenshots) {
+		t.Errorf("Expected 2 screenshots, got : %d", len(beforeSpecScreenshots))
+	}
+	for i, e := range expectedBeforeSpecScreenshots {
+		if string(beforeSpecScreenshots[i]) != e {
+			t.Errorf("Expected `%s` screenshot, got : %s", e, beforeSpecScreenshots[i])
+		}
+	}
+	if len(afterSpecScreenshots) != len(expectedAfterSpecScreenshots) {
+		t.Errorf("Expected 2 screenshots, got : %d", len(afterSpecScreenshots))
+	}
+	for i, e := range expectedAfterSpecScreenshots {
+		if string(afterSpecScreenshots[i]) != e {
+			t.Errorf("Expected `%s` screenshot, got : %s", e, afterSpecScreenshots[i])
+		}
+	}
+}
+
 func TestExecuteShouldNotifyAfterSpecEvent(t *testing.T) {
 	errs := gauge.NewBuildErrors()
 	r := &mockRunner{}
@@ -662,7 +555,7 @@ func TestExecuteShouldNotifyAfterSpecEvent(t *testing.T) {
 		return &gauge_messages.ProtoExecutionResult{}
 	}
 
-	ch := make(chan event.ExecutionEvent, 0)
+	ch := make(chan event.ExecutionEvent)
 	event.InitRegistry()
 	event.Register(ch, event.SpecEnd)
 	wg := &sync.WaitGroup{}
@@ -685,6 +578,7 @@ func TestExecuteShouldNotifyAfterSpecEvent(t *testing.T) {
 	if !eventRaised {
 		t.Error("Expected SpecEnd event to be raised")
 	}
+	event.InitRegistry()
 }
 
 type mockExecutor struct {
@@ -696,6 +590,7 @@ func (e *mockExecutor) execute(i gauge.Item, r result.Result) {
 }
 
 func TestExecuteScenario(t *testing.T) {
+	MaxRetriesCount = 1
 	errs := gauge.NewBuildErrors()
 	se := newSpecExecutor(exampleSpecWithScenarios, nil, nil, errs, 0)
 	executedScenarios := make([]string, 0)
@@ -716,6 +611,98 @@ func TestExecuteScenario(t *testing.T) {
 			t.Errorf("Expected '%s' scenario to be executed. Got %s", s, executedScenarios)
 		}
 	}
+}
+
+func TestExecuteScenarioWithRetries(t *testing.T) {
+	MaxRetriesCount = 3
+	errs := gauge.NewBuildErrors()
+	se := newSpecExecutor(exampleSpecWithScenarios, nil, nil, errs, 0)
+
+	count := 1
+	se.scenarioExecutor = &mockExecutor{
+		executeFunc: func(i gauge.Item, r result.Result) {
+			if count < MaxRetriesCount {
+				r.SetFailure()
+			} else {
+				r.(*result.ScenarioResult).ProtoScenario.ExecutionStatus = gauge_messages.ExecutionStatus_PASSED
+			}
+
+			count++
+		},
+	}
+
+	sceResult, _ := se.executeScenario(exampleSpecWithScenarios.Scenarios[0])
+
+	if sceResult.GetFailed() {
+		t.Errorf("Expect sceResult.GetFailed() = false, got true")
+	}
+}
+
+var exampleSpecWithTags = &gauge.Specification{
+	Heading:  &gauge.Heading{Value: "Example Spec"},
+	FileName: "example.spec",
+	Tags:     &gauge.Tags{RawValues: [][]string{{"tagSpec"}}},
+	Scenarios: []*gauge.Scenario{
+		&gauge.Scenario{Heading: &gauge.Heading{Value: "Example Scenario 1"}, Items: make([]gauge.Item, 0), Tags: &gauge.Tags{RawValues: [][]string{{"tagSce"}}}, Span: &gauge.Span{}},
+	},
+}
+
+func TestExecuteScenarioShouldNotRetryIfNotMatchTags(t *testing.T) {
+	MaxRetriesCount = 2
+	RetryOnlyTags = "tagN"
+
+	se := newSpecExecutorForTestsWithRetry()
+	sceResult, _ := se.executeScenario(exampleSpecWithTags.Scenarios[0])
+
+	if !sceResult.GetFailed() {
+		t.Errorf("Expect sceResult.GetFailed() = true, got false")
+	}
+}
+
+func TestExecuteScenarioShouldRetryIfSpecificationMatchTags(t *testing.T) {
+	MaxRetriesCount = 2
+	RetryOnlyTags = "tagSpec"
+
+	se := newSpecExecutorForTestsWithRetry()
+
+	sceResult, _ := se.executeScenario(exampleSpecWithTags.Scenarios[0])
+
+	if sceResult.GetFailed() {
+		t.Errorf("Expect sceResult.GetFailed() = false, got true")
+	}
+}
+
+func TestExecuteScenarioShouldRetryIfScenarioMatchTags(t *testing.T) {
+	MaxRetriesCount = 2
+	RetryOnlyTags = "tagSce"
+
+	se := newSpecExecutorForTestsWithRetry()
+
+	sceResult, _ := se.executeScenario(exampleSpecWithTags.Scenarios[0])
+
+	if sceResult.GetFailed() {
+		t.Errorf("Expect sceResult.GetFailed() = false, got true")
+	}
+}
+
+func newSpecExecutorForTestsWithRetry() *specExecutor {
+	errs := gauge.NewBuildErrors()
+	se := newSpecExecutor(exampleSpecWithTags, nil, nil, errs, 0)
+
+	count := 1
+	se.scenarioExecutor = &mockExecutor{
+		executeFunc: func(i gauge.Item, r result.Result) {
+			if count < MaxRetriesCount {
+				r.SetFailure()
+			} else {
+				r.(*result.ScenarioResult).ProtoScenario.ExecutionStatus = gauge_messages.ExecutionStatus_PASSED
+			}
+
+			count++
+		},
+	}
+
+	return se
 }
 
 func TestExecuteShouldMarkSpecAsSkippedWhenAllScenariosSkipped(t *testing.T) {

@@ -39,7 +39,7 @@ type TableCell struct {
 }
 
 func NewTable(headers []string, cols [][]TableCell, lineNo int) *Table {
-	headerIndx := make(map[string]int, 0)
+	headerIndx := make(map[string]int)
 	for i, h := range headers {
 		headerIndx[h] = i
 	}
@@ -58,7 +58,7 @@ func (table *Table) IsInitialized() bool {
 
 func (cell *TableCell) GetValue() string {
 	value := cell.Value
-	if cell.CellType == Dynamic {
+	if cell.CellType == Dynamic || cell.CellType == SpecialString {
 		value = fmt.Sprintf("<%s>", value)
 	}
 	return value
@@ -84,11 +84,11 @@ func (table *Table) GetDynamicArgs() []string {
 	return args
 }
 
-func (table *Table) Get(header string) []TableCell {
+func (table *Table) Get(header string) ([]TableCell, error) {
 	if !table.headerExists(header) {
-		panic(fmt.Sprintf("Table column %s not found", header))
+		return nil, fmt.Errorf("Table column %s not found", header)
 	}
-	return table.Columns[table.headerIndexMap[header]]
+	return table.Columns[table.headerIndexMap[header]], nil
 }
 
 func (table *Table) headerExists(header string) bool {
@@ -107,12 +107,11 @@ func (table *Table) AddHeaders(columnNames []string) {
 	}
 }
 
-func (table *Table) AddRowValues(rowValues []string) {
-	tableCells := table.createTableCells(rowValues)
+func (table *Table) AddRowValues(tableCells []TableCell) {
 	table.addRows(tableCells)
 }
 
-func (table *Table) createTableCells(rowValues []string) []TableCell {
+func (table *Table) CreateTableCells(rowValues []string) []TableCell {
 	tableCells := make([]TableCell, 0)
 	for _, value := range rowValues {
 		tableCells = append(tableCells, GetTableCell(value))
@@ -122,7 +121,7 @@ func (table *Table) createTableCells(rowValues []string) []TableCell {
 
 func (table *Table) toHeaderSizeRow(rows []TableCell) []TableCell {
 	finalCells := make([]TableCell, 0)
-	for i, _ := range table.Headers {
+	for i := range table.Headers {
 		var cell TableCell
 		if len(rows)-1 >= i {
 			cell = rows[i]
@@ -152,7 +151,8 @@ func (table *Table) Rows() [][]string {
 	for i := 0; i < len(table.Columns[0]); i++ {
 		row := make([]string, 0)
 		for _, header := range table.Headers {
-			tableCell := table.Get(header)[i]
+			tableCells, _ := table.Get(header)
+			tableCell := tableCells[i]
 			value := tableCell.GetValue()
 			row = append(row, value)
 		}

@@ -63,11 +63,11 @@ func (s *MySuite) TestParsingInvalidSpecialType(c *C) {
 func (s *MySuite) TestConvertCsvToTable(c *C) {
 	table, _ := convertCsvToTable("id,name\n1,foo\n2,bar")
 
-	idColumn := table.Get("id")
+	idColumn, _ := table.Get("id")
 	c.Assert(idColumn[0].Value, Equals, "1")
 	c.Assert(idColumn[1].Value, Equals, "2")
 
-	nameColumn := table.Get("name")
+	nameColumn, _ := table.Get("name")
 	c.Assert(nameColumn[0].Value, Equals, "foo")
 	c.Assert(nameColumn[1].Value, Equals, "bar")
 }
@@ -86,7 +86,7 @@ func (s *MySuite) TestParsingUnknownSpecialType(c *C) {
 
 func (s *MySuite) TestPopulatingConceptLookup(c *C) {
 	parser := new(SpecParser)
-	specText := SpecBuilder().specHeading("A spec heading").
+	specText := newSpecBuilder().specHeading("A spec heading").
 		tableHeader("id", "name", "phone").
 		tableHeader("123", "foo", "888").
 		scenarioHeading("First scenario").
@@ -95,22 +95,28 @@ func (s *MySuite) TestPopulatingConceptLookup(c *C) {
 
 	conceptDictionary := gauge.NewConceptDictionary()
 	path, _ := filepath.Abs(filepath.Join("testdata", "dynamic_param_concept.cpt"))
-	AddConcepts(path, conceptDictionary)
-	spec, _ := parser.Parse(specText, conceptDictionary, "")
+	_, _, err := AddConcepts([]string{path}, conceptDictionary)
+	c.Assert(err, IsNil)
+	spec, _, _ := parser.Parse(specText, conceptDictionary, "")
 	concept := spec.Scenarios[0].Steps[0]
 
-	dataTableLookup := new(gauge.ArgLookup).FromDataTableRow(&spec.DataTable.Table, 0)
-	PopulateConceptDynamicParams(concept, dataTableLookup)
-
-	c.Assert(concept.GetArg("user-id").Value, Equals, "123")
-	c.Assert(concept.GetArg("user-name").Value, Equals, "foo")
-	c.Assert(concept.GetArg("user-phone").Value, Equals, "888")
+	dataTableLookup := new(gauge.ArgLookup)
+	err = dataTableLookup.ReadDataTableRow(&spec.DataTable.Table, 0)
+	c.Assert(err, IsNil)
+	err = PopulateConceptDynamicParams(concept, dataTableLookup)
+	c.Assert(err, IsNil)
+	useridArg, _ := concept.GetArg("user-id")
+	c.Assert(useridArg.Value, Equals, "123")
+	usernameArg, _ := concept.GetArg("user-name")
+	c.Assert(usernameArg.Value, Equals, "foo")
+	userphoneArg, _ := concept.GetArg("user-phone")
+	c.Assert(userphoneArg.Value, Equals, "888")
 
 }
 
 func (s *MySuite) TestPopulatingNestedConceptLookup(c *C) {
 	parser := new(SpecParser)
-	specText := SpecBuilder().specHeading("A spec heading").
+	specText := newSpecBuilder().specHeading("A spec heading").
 		tableHeader("id", "name", "phone").
 		tableHeader("123", "prateek", "8800").
 		scenarioHeading("First scenario").
@@ -120,76 +126,165 @@ func (s *MySuite) TestPopulatingNestedConceptLookup(c *C) {
 
 	conceptDictionary := gauge.NewConceptDictionary()
 	path, _ := filepath.Abs(filepath.Join("testdata", "dynamic_param_concept.cpt"))
-	AddConcepts(path, conceptDictionary)
-	spec, _ := parser.Parse(specText, conceptDictionary, "")
+	_, _, err := AddConcepts([]string{path}, conceptDictionary)
+	c.Assert(err, IsNil)
+	spec, _, _ := parser.Parse(specText, conceptDictionary, "")
 	concept1 := spec.Scenarios[0].Steps[0]
 
-	dataTableLookup := new(gauge.ArgLookup).FromDataTableRow(&spec.DataTable.Table, 0)
-	PopulateConceptDynamicParams(concept1, dataTableLookup)
+	dataTableLookup := new(gauge.ArgLookup)
+	err = dataTableLookup.ReadDataTableRow(&spec.DataTable.Table, 0)
+	c.Assert(err, IsNil)
+	err = PopulateConceptDynamicParams(concept1, dataTableLookup)
+	c.Assert(err, IsNil)
 
-	c.Assert(concept1.GetArg("user-id").Value, Equals, "123")
-	c.Assert(concept1.GetArg("user-name").Value, Equals, "prateek")
-	c.Assert(concept1.GetArg("user-phone").Value, Equals, "8800")
+	useridArg1, _ := concept1.GetArg("user-id")
+	c.Assert(useridArg1.Value, Equals, "123")
+	usernameArg1, _ := concept1.GetArg("user-name")
+	c.Assert(usernameArg1.Value, Equals, "prateek")
+	userphoneArg1, _ := concept1.GetArg("user-phone")
+	c.Assert(userphoneArg1.Value, Equals, "8800")
 
 	nestedConcept := concept1.ConceptSteps[0]
-	c.Assert(nestedConcept.GetArg("userid").Value, Equals, "123")
-	c.Assert(nestedConcept.GetArg("username").Value, Equals, "prateek")
+	useridArgN1, _ := nestedConcept.GetArg("userid")
+	c.Assert(useridArgN1.Value, Equals, "123")
+	usernameArgN1, _ := nestedConcept.GetArg("username")
+	c.Assert(usernameArgN1.Value, Equals, "prateek")
 
 	concept2 := spec.Scenarios[0].Steps[1]
-	c.Assert(concept2.GetArg("user-id").Value, Equals, "456")
-	c.Assert(concept2.GetArg("user-name").Value, Equals, "foo")
-	c.Assert(concept2.GetArg("user-phone").Value, Equals, "9900")
+	useridArg2, _ := concept2.GetArg("user-id")
+	c.Assert(useridArg2.Value, Equals, "456")
+	usernameArg2, _ := concept2.GetArg("user-name")
+	c.Assert(usernameArg2.Value, Equals, "foo")
+	userphoneArg2, _ := concept2.GetArg("user-phone")
+	c.Assert(userphoneArg2.Value, Equals, "9900")
 
 	nestedConcept2 := concept2.ConceptSteps[0]
-	c.Assert(nestedConcept2.GetArg("userid").Value, Equals, "456")
-	c.Assert(nestedConcept2.GetArg("username").Value, Equals, "foo")
-
+	useridArgN2, _ := nestedConcept2.GetArg("userid")
+	c.Assert(useridArgN2.Value, Equals, "456")
+	usernameArgN2, _ := nestedConcept2.GetArg("username")
+	c.Assert(usernameArgN2.Value, Equals, "foo")
 }
 
 func (s *MySuite) TestPopulatingNestedConceptsWithStaticParametersLookup(c *C) {
 	parser := new(SpecParser)
-	specText := SpecBuilder().specHeading("A spec heading").
+	specText := newSpecBuilder().specHeading("A spec heading").
 		scenarioHeading("First scenario").
 		step("create user \"456\" \"foo\" and \"123456\"").
 		String()
 
 	conceptDictionary := gauge.NewConceptDictionary()
 	path, _ := filepath.Abs(filepath.Join("testdata", "static_param_concept.cpt"))
-	AddConcepts(path, conceptDictionary)
+	_, _, err := AddConcepts([]string{path}, conceptDictionary)
+	c.Assert(err, IsNil)
 
-	spec, _ := parser.Parse(specText, conceptDictionary, "")
+	spec, _, _ := parser.Parse(specText, conceptDictionary, "")
 	concept1 := spec.Scenarios[0].Steps[0]
 
-	dataTableLookup := new(gauge.ArgLookup).FromDataTableRow(&spec.DataTable.Table, 0)
-	PopulateConceptDynamicParams(concept1, dataTableLookup)
-
-	c.Assert(concept1.GetArg("user-id").Value, Equals, "456")
-	c.Assert(concept1.GetArg("user-name").Value, Equals, "foo")
-	c.Assert(concept1.GetArg("user-phone").Value, Equals, "123456")
+	dataTableLookup := new(gauge.ArgLookup)
+	err = dataTableLookup.ReadDataTableRow(&spec.DataTable.Table, 0)
+	c.Assert(err, IsNil)
+	err = PopulateConceptDynamicParams(concept1, dataTableLookup)
+	c.Assert(err, IsNil)
+	useridArg1, _ := concept1.GetArg("user-id")
+	c.Assert(useridArg1.Value, Equals, "456")
+	usernameArg1, _ := concept1.GetArg("user-name")
+	c.Assert(usernameArg1.Value, Equals, "foo")
+	userphoneArg1, _ := concept1.GetArg("user-phone")
+	c.Assert(userphoneArg1.Value, Equals, "123456")
 
 	nestedConcept := concept1.ConceptSteps[0]
-	c.Assert(nestedConcept.GetArg("userid").Value, Equals, "456")
-	c.Assert(nestedConcept.GetArg("username").Value, Equals, "static-value")
+	useridArgN, _ := nestedConcept.GetArg("userid")
+	c.Assert(useridArgN.Value, Equals, "456")
+	usernameArgN, _ := nestedConcept.GetArg("username")
+	c.Assert(usernameArgN.Value, Equals, "static-value")
+}
+
+func (s *MySuite) TestPopulatingConceptsWithDynamicParametersInTable(c *C) {
+	parser := new(SpecParser)
+	specText := newSpecBuilder().specHeading("A spec heading").
+		tableHeader("property").
+		tableRow("something").
+		scenarioHeading("First scenario").
+		step("create user \"someone\" with ").
+		tableHeader("name").
+		tableRow("<property>").
+		String()
+	conceptDictionary := gauge.NewConceptDictionary()
+	path, _ := filepath.Abs(filepath.Join("testdata", "table_param_concept.cpt"))
+	_, _, err := AddConcepts([]string{path}, conceptDictionary)
+	c.Assert(err, IsNil)
+
+	spec, _, _ := parser.Parse(specText, conceptDictionary, "")
+	concept1 := spec.Scenarios[0].Steps[0]
+
+	dataTableLookup := new(gauge.ArgLookup)
+	err = dataTableLookup.ReadDataTableRow(&spec.DataTable.Table, 0)
+	c.Assert(err, IsNil)
+	err = PopulateConceptDynamicParams(concept1, dataTableLookup)
+	c.Assert(err, IsNil)
+	tableArg, err := concept1.Lookup.GetArg("addresses")
+	c.Assert(err, IsNil)
+	v, err := tableArg.Table.Get("name")
+	c.Assert(err, IsNil)
+	c.Assert(v[0].CellType, Equals, gauge.Static)
+	c.Assert(v[0].Value, Equals, "something")
 }
 
 func (s *MySuite) TestEachConceptUsageIsUpdatedWithRespectiveParams(c *C) {
 	parser := new(SpecParser)
-	specText := SpecBuilder().specHeading("A spec heading").
+	specText := newSpecBuilder().specHeading("A spec heading").
 		scenarioHeading("First scenario").
 		step("create user \"sdf\" \"name\" and \"1234\"").
 		String()
 
 	conceptDictionary := gauge.NewConceptDictionary()
 	path, _ := filepath.Abs(filepath.Join("testdata", "static_param_concept.cpt"))
-	AddConcepts(path, conceptDictionary)
-	spec, _ := parser.Parse(specText, conceptDictionary, "")
+	_, _, err := AddConcepts([]string{path}, conceptDictionary)
+	c.Assert(err, IsNil)
+	spec, _, _ := parser.Parse(specText, conceptDictionary, "")
 	concept1 := spec.Scenarios[0].Steps[0]
 
 	nestedConcept := concept1.ConceptSteps[0]
 	nestedConcept1 := concept1.ConceptSteps[1]
 
-	c.Assert(nestedConcept.GetArg("username").Value, Equals, "static-value")
-	c.Assert(nestedConcept1.GetArg("username").Value, Equals, "static-value1")
-	c.Assert(nestedConcept.GetArg("userid").Value, Equals, "sdf")
-	c.Assert(nestedConcept1.GetArg("userid").Value, Equals, "sdf")
+	usernameArg, _ := nestedConcept.GetArg("username")
+	c.Assert(usernameArg.Value, Equals, "static-value")
+	usernameArg1, _ := nestedConcept1.GetArg("username")
+	c.Assert(usernameArg1.Value, Equals, "static-value1")
+	useridArg, _ := nestedConcept.GetArg("userid")
+	c.Assert(useridArg.Value, Equals, "sdf")
+	useridArg1, _ := nestedConcept1.GetArg("userid")
+	c.Assert(useridArg1.Value, Equals, "sdf")
+}
+
+func (s *MySuite) TestGetResolveParameterFromTable(c *C) {
+	parser := new(SpecParser)
+	specText := newSpecBuilder().specHeading("Spec Heading").scenarioHeading("First scenario").step("my step").text("|name|id|").text("|---|---|").text("|john|123|").text("|james|<file:testdata/foo.txt>|").String()
+
+	specs, _ := parser.ParseSpecText(specText, "")
+
+	step := specs.Steps()[0]
+
+	parameters, err := getResolvedParams(step, nil, nil)
+
+	c.Assert(len(parameters), Equals, 1)
+	c.Assert(parameters[0].Table.Rows[0].GetCells()[0], Equals, "john")
+	c.Assert(parameters[0].Table.Rows[0].GetCells()[1], Equals, "123")
+	c.Assert(parameters[0].Table.Rows[1].GetCells()[0], Equals, "james")
+	c.Assert(parameters[0].Table.Rows[1].GetCells()[1], Equals, "007")
+
+	c.Assert(err, IsNil)
+}
+
+func (s *MySuite) TestGetResolveParameterFromDataTable(c *C) {
+	parser := new(SpecParser)
+	specText := newSpecBuilder().specHeading("Spec Heading").text("|name|id|").text("|---|---|").text("|john|123|").text("|james|<file:testdata/foo.txt>|").scenarioHeading("First scenario").step("my step <id>").String()
+	spec, _ := parser.ParseSpecText(specText, "")
+
+	GetResolvedDataTablerows(spec.DataTable.Table)
+
+	c.Assert(spec.DataTable.Table.Columns[0][0].Value, Equals, "john")
+	c.Assert(spec.DataTable.Table.Columns[0][1].Value, Equals, "james")
+	c.Assert(spec.DataTable.Table.Columns[1][0].Value, Equals, "123")
+	c.Assert(spec.DataTable.Table.Columns[1][1].Value, Equals, "007")
 }

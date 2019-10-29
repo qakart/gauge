@@ -20,174 +20,185 @@ package track
 import (
 	"net/http"
 	"net/http/httputil"
+	"runtime"
+	"runtime/debug"
+	"strconv"
 	"strings"
+	"time"
+
+	"github.com/getgauge/gauge/env"
 
 	"fmt"
 
+	"os"
+
+	"sync"
+
 	"github.com/getgauge/gauge/config"
 	"github.com/getgauge/gauge/logger"
-	"github.com/getgauge/gauge/manifest"
 	"github.com/getgauge/gauge/version"
-	"github.com/jpillora/go-ogle-analytics"
+	ga "github.com/jpillora/go-ogle-analytics"
 )
 
 const (
-	gaTrackingID  = "UA-54838477-1"
-	appName       = "Gauge Core"
-	consoleMedium = "console"
-	apiMedium     = "api"
+	gaTrackingID     = "UA-54838477-1"
+	gaTestTrackingID = "UA-100778536-1"
+	appName          = "Gauge Core"
+	consoleMedium    = "console"
+	ciMedium         = "CI"
+	timeout          = 1
+	// GaugeTelemetryMessageHeading is the header printed for telemetry warning
+	GaugeTelemetryMessageHeading = `
+Telemetry
+---------
+`
+	// GaugeTelemetryMessage is the message printed when user has not explicitly opted in/out
+	// of telemetry. Printed only in CLI.
+	GaugeTelemetryMessage = `This installation of Gauge collects usage data in order to help us improve your experience.
+The data is anonymous and doesn't include command-line arguments.
+To turn this message off opt in or out by running 'gauge telemetry on' or 'gauge telemetry off'.
+
+Read more about Gauge telemetry at https://gauge.org/telemetry
+`
+	// GaugeTelemetryMachineRedableMessage is the message printed when user has not explicitly opted in/out
+	// of telemetry. Printed only in CLI.
+	GaugeTelemetryMachineRedableMessage = `This installation of Gauge collects usage data in order to help us improve your experience.
+<a href="https://gauge.org/telemetry">Read more here</a> about Gauge telemetry.`
+
+	// GaugeTelemetryLSPMessage is the message printed when user has not explicitly opted in/out
+	// of telemetry. Displayed only in LSP Client.
+	GaugeTelemetryLSPMessage = `This installation of Gauge collects usage data in order to help us improve your experience.
+[Read more here](https://gauge.org/telemetry) about Gauge telemetry.
+Would you like to participate?`
 )
 
-func send(category, action, label, medium string) {
-	if !config.AnalyticsEnabled() {
-		return
-	}
-	client, err := ga.NewClient(gaTrackingID)
-	client.HttpClient = &http.Client{}
-	client.ClientID(config.UniqueID())
-	client.AnonymizeIP(true)
-	client.ApplicationName(appName)
-	client.ApplicationVersion(version.FullVersion())
-	client.CampaignMedium(medium)
-	client.CampaignSource(appName)
+var gaHTTPTransport = http.DefaultTransport
 
-	if config.AnalyticsLogEnabled() {
-		client.HttpClient = newlogEnabledHTTPClient()
-	}
+var telemetryEnabled, telemetryLogEnabled bool
 
-	if err != nil {
-		logger.Warning("Unable to create ga client, %s", err)
-	}
+// Init sets flags used by the package methods.
+func Init() {
+	telemetryEnabled = config.TelemetryEnabled()
+	telemetryLogEnabled = config.TelemetryLogEnabled()
+}
 
-	ev := ga.NewEvent(category, action)
-	if label != "" {
-		ev.Label(label)
+func send(category, action, label, medium string, wg *sync.WaitGroup) bool {
+	if !telemetryEnabled {
+		wg.Done()
+		return false
 	}
+	label = strings.Trim(fmt.Sprintf("%s,%s", label, runtime.GOOS), ",")
+	sendChan := make(chan bool, 1)
+	go func(c chan<- bool) {
+		defer recoverPanic()
+		t := gaTrackingID
+		if env.UseTestGA() {
+			t = gaTestTrackingID
+		}
+		client, err := ga.NewClient(t)
+		if err != nil {
+			logger.Debugf(true, "Unable to create ga client, %s", err)
+		}
+		client.HttpClient = &http.Client{}
+		client.ClientID(config.UniqueID())
+		client.AnonymizeIP(true)
+		client.ApplicationName(appName)
+		client.ApplicationVersion(version.FullVersion())
+		client.CampaignMedium(medium)
+		client.CampaignSource(appName)
+		client.HttpClient.Transport = gaHTTPTransport
+		if telemetryLogEnabled {
+			client.HttpClient.Transport = newlogEnabledHTTPTransport()
+		}
+		ev := ga.NewEvent(category, action)
+		if label != "" {
+			ev.Label(label)
+		}
+		err = client.Send(ev)
+		if err != nil {
+			logger.Debugf(true, "Unable to send analytics data, %s", err)
+		}
+		c <- true
+	}(sendChan)
 
-	err = client.Send(ev)
-	if err != nil {
-		logger.Warning("Unable to send analytics data, %s", err)
+	for {
+		select {
+		case <-sendChan:
+			wg.Done()
+			return true
+		case <-time.After(timeout * time.Second):
+			logger.Debugf(true, "Unable to send analytics data, timed out")
+			wg.Done()
+			return false
+		}
+	}
+}
+
+func recoverPanic() {
+	if r := recover(); r != nil {
+		logger.Errorf(true, "%v\n%s", r, string(debug.Stack()))
 	}
 }
 
 func trackConsole(category, action, label string) {
-	go send(category, action, label, consoleMedium)
+	var medium = consoleMedium
+	if isCI() {
+		medium = ciMedium
+	}
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	defer wg.Wait()
+	go send(category, action, label, medium, wg)
 }
 
-func trackAPI(category, action, label string) {
-	go send(category, action, label, apiMedium)
+func isCI() bool {
+	// Travis, AppVeyor, CircleCI, Wercket, drone.io, gitlab-ci
+	if ci, _ := strconv.ParseBool(os.Getenv("CI")); ci {
+		return true
+	}
+
+	// GoCD
+	if os.Getenv("GO_SERVER_URL") != "" {
+		return true
+	}
+
+	// Jenkins
+	if os.Getenv("JENKINS_URL") != "" {
+		return true
+	}
+
+	// Teamcity
+	if os.Getenv("TEAMCITY_VERSION") != "" {
+		return true
+	}
+
+	// TFS
+	if ci, _ := strconv.ParseBool(os.Getenv("TFS_BUILD")); ci {
+		return true
+	}
+	return false
 }
 
-func trackManifest() {
-	m, err := manifest.ProjectManifest()
-	if err == nil {
-		trackConsole("manifest", "language", fmt.Sprintf("%s,%s", m.Language, strings.Join(m.Plugins, ",")))
+func daemon(mode, lang string) {
+	trackConsole("daemon", mode, lang)
+}
+
+// ScheduleDaemonTracking sends pings to GA at regular intervals. This is used to flag active usage.
+func ScheduleDaemonTracking(mode, lang string) {
+	daemon(mode, lang)
+	ticker := time.NewTicker(28 * time.Minute)
+	if env.UseTestGA() && env.TelemetryInterval() != "" {
+		duration, _ := strconv.Atoi(env.TelemetryInterval())
+		ticker = time.NewTicker(time.Duration(duration) * time.Minute)
+	}
+	for {
+		<-ticker.C
+		daemon(mode, lang)
 	}
 }
 
-func Execution(parallel, tagged, sorted, simpleConsole, verbose bool, parallelExecutionStrategy string) {
-	action := "serial"
-	if parallel {
-		action = "parallel"
-	}
-	flags := []string{action}
-
-	if tagged {
-		flags = append(flags, "tagged")
-	}
-
-	if sorted {
-		flags = append(flags, "sorted")
-	}
-
-	if simpleConsole {
-		flags = append(flags, "simple-console")
-	}
-
-	if verbose {
-		flags = append(flags, "verbose")
-	}
-
-	trackManifest()
-	trackConsole("execution", action, strings.Join(flags, ","))
-}
-
-func Validation() {
-	trackConsole("validation", "validate", "")
-}
-
-func Docs(docs string) {
-	trackConsole("docs", "generate", docs)
-}
-
-func Format() {
-	trackConsole("formatting", "format", "")
-}
-
-func Refactor() {
-	trackConsole("refactoring", "rephrase", "")
-}
-
-func ListTemplates() {
-	trackConsole("templates", "list", "")
-}
-
-func AddPlugins(plugin string) {
-	trackConsole("plugins", "add", plugin)
-}
-
-func UninstallPlugin(plugin string) {
-	trackConsole("plugins", "uninstall", plugin)
-}
-
-func ProjectInit() {
-	trackConsole("project", "init", "")
-}
-
-func Install(plugin string, zip bool) {
-	if zip {
-		trackConsole("plugins", "install-zip", plugin)
-	} else {
-		trackConsole("plugins", "install", plugin)
-	}
-}
-
-func Update(plugin string) {
-	trackConsole("plugins", "update", plugin)
-}
-
-func UpdateAll() {
-	trackConsole("plugins", "update-all", "")
-}
-
-func InstallAll() {
-	trackConsole("plugins", "install-all", "")
-}
-
-func CheckUpdates() {
-	trackConsole("updates", "check", "")
-}
-
-func Daemon() {
-	trackConsole("execution", "daemon", "")
-}
-
-func APIRefactoring() {
-	trackAPI("refactoring", "rephrase", "")
-}
-
-func APIExtractConcept() {
-	trackAPI("refactoring", "extract-concept", "")
-}
-
-func APIFormat() {
-	trackAPI("formatting", "format", "")
-}
-
-func newlogEnabledHTTPClient() *http.Client {
-	return &http.Client{
-		Transport: logEnabledRoundTripper{},
-	}
+func newlogEnabledHTTPTransport() http.RoundTripper {
+	return &logEnabledRoundTripper{}
 }
 
 type logEnabledRoundTripper struct {
@@ -196,9 +207,9 @@ type logEnabledRoundTripper struct {
 func (r logEnabledRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	dump, err := httputil.DumpRequestOut(req, true)
 	if err != nil {
-		logger.Warning("Unable to dump analytics request, %s", err)
+		logger.Debugf(true, "Unable to dump analytics request, %s", err)
 	}
 
-	logger.Debug(fmt.Sprintf("%q", dump))
+	logger.Debugf(true, fmt.Sprintf("%q", dump))
 	return http.DefaultTransport.RoundTrip(req)
 }

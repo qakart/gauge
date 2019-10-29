@@ -5,6 +5,14 @@
 # ./build/mkrpm.sh [--rebuild]
 
 set -e
+if [[ -z $GOPATH ]]; then
+    export GOPATH=`pwd`
+fi
+if [[ -z $GOBIN ]]; then
+    export GOBIN="$GOPATH/bin"
+fi
+
+cd $GOPATH/src/github.com/getgauge/gauge
 
 function err () {
     echo "ERROR: $1"
@@ -21,7 +29,6 @@ FILE_EXT="zip"
 FILE_MODE=755
 RELEASE=all
 SPEC_FILE="$BUILD_DIR/packaging/rpm/gauge.spec"
-GAUGE_SETUP_FILE="$BUILD_DIR/packaging/gauge_setup"
 
 if [ "$OS" != "linux" ]; then
     err "This script can only be run on Linux systems"
@@ -97,9 +104,8 @@ function prep_rpm() {
     echo "Preparing .rpm data..."
     rpmdev-setuptree
 
-    cp -r "$PKG_SRC/bin" "$TARGET/BUILD/"
-    cp -r "$PKG_SRC/config" "$TARGET/BUILD/"
-    cp "$GAUGE_SETUP_FILE" "$TARGET/BUILD/bin/gauge_setup"
+    mkdir -m $FILE_MODE -p "$TARGET/BUILD/bin/"
+    cp -r "$PKG_SRC/gauge" "$TARGET/BUILD/bin/"
 
     SPEC_DATA=`cat "$SPEC_FILE"`
     echo "$SPEC_DATA" | sed "s/<version>/$RPM_VERSION/g" | sed "s/<release>/$RELEASE/g" > "$TARGET/SPECS/gauge.spec"

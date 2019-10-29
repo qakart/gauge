@@ -37,6 +37,10 @@ func mergeDataTableSpecResults(sResult *result.SuiteResult) *result.SuiteResult 
 	suiteRes.ProjectName = sResult.ProjectName
 	suiteRes.Environment = sResult.Environment
 	suiteRes.Tags = sResult.Tags
+	suiteRes.PreHookMessages = append(suiteRes.PreHookMessages, sResult.PreHookMessages...)
+	suiteRes.PostHookMessages = append(suiteRes.PostHookMessages, sResult.PostHookMessages...)
+	suiteRes.PreHookScreenshots = append(suiteRes.PreHookScreenshots, sResult.PreHookScreenshots...)
+	suiteRes.PostHookScreenshots = append(suiteRes.PostHookScreenshots, sResult.PostHookScreenshots...)
 	combinedResults := make(map[string][]*result.SpecResult)
 	for _, res := range sResult.SpecResults {
 		fileName := res.ProtoSpec.GetFileName()
@@ -127,19 +131,22 @@ func getItems(table *m.ProtoTable, scnResults []*m.ProtoItem, results []*result.
 
 func aggregateDataTableScnStats(results map[string][]*m.ProtoTableDrivenScenario, specResult *result.SpecResult) {
 	for _, dResult := range results {
-		isFailed := 0
-		isSkipped := 0
 		for _, res := range dResult {
+			isTableIndicesExcluded := false
 			if res.Scenario.ExecutionStatus == m.ExecutionStatus_FAILED {
-				isFailed = 1
+				specResult.ScenarioFailedCount++
 			} else if res.Scenario.ExecutionStatus == m.ExecutionStatus_SKIPPED &&
 				!strings.Contains(res.Scenario.SkipErrors[0], "--table-rows") {
-				isSkipped = 1
+				specResult.ScenarioSkippedCount++
+				specResult.Skipped = true
+			} else if res.Scenario.ExecutionStatus == m.ExecutionStatus_SKIPPED &&
+				strings.Contains(res.Scenario.SkipErrors[0], "--table-rows") {
+				isTableIndicesExcluded = true
+			}
+			if !isTableIndicesExcluded {
+				specResult.ScenarioCount++
 			}
 		}
-		specResult.ScenarioFailedCount += isFailed
-		specResult.ScenarioSkippedCount += isSkipped
-		specResult.ScenarioCount++
 	}
 }
 
@@ -147,7 +154,6 @@ func modifySpecStats(scn *m.ProtoScenario, specRes *result.SpecResult) {
 	switch scn.ExecutionStatus {
 	case m.ExecutionStatus_SKIPPED:
 		specRes.ScenarioSkippedCount++
-		return
 	case m.ExecutionStatus_FAILED:
 		specRes.ScenarioFailedCount++
 	}

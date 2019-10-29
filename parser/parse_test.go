@@ -20,6 +20,8 @@ package parser
 import (
 	"path/filepath"
 
+	"strings"
+
 	"github.com/getgauge/gauge/gauge"
 	. "gopkg.in/check.v1"
 )
@@ -122,30 +124,24 @@ func (s *MySuite) TestCreateStepValueFromStepWithSpecialParams(c *C) {
 	c.Assert(stepValue.ParameterizedStepValue, Equals, "a step with <hello>, <file:user.txt> and <table>")
 }
 
-func (s *MySuite) TestAddSpecsToMapPopulatesScenarioInExistingSpec(c *C) {
-	specsMap := make(map[string]*gauge.Specification)
-	scenario1 := &gauge.Scenario{Heading: &gauge.Heading{Value: "scenario1"}}
-	scenario2 := &gauge.Scenario{Heading: &gauge.Heading{Value: "scenario2"}}
-	heading := &gauge.Heading{Value: "spec heading"}
-	specName := "foo.spec"
-	spec1 := &gauge.Specification{Heading: heading, FileName: specName, Scenarios: []*gauge.Scenario{scenario1}, Items: []gauge.Item{heading, scenario1}}
-	spec2 := &gauge.Specification{Heading: heading, FileName: specName, Scenarios: []*gauge.Scenario{scenario2}, Items: []gauge.Item{heading, scenario2}}
-	specsMap[specName] = spec1
-	addSpecsToMap([]*gauge.Specification{spec2}, specsMap)
-
-	c.Assert(len(specsMap), Equals, 1)
-	c.Assert(len(specsMap[specName].Scenarios), Equals, 2)
-	c.Assert(len(specsMap[specName].Items), Equals, 3)
-}
-
-func (s *MySuite) TestSpecsFormArgsForMultipleIndexedArgsForOneSpec(c *C) {
+func (s *MySuite) TestSpecsFromArgsForMultipleIndexedArgsForOneSpec(c *C) {
 	specs, _ := parseSpecsInDirs(gauge.NewConceptDictionary(), []string{filepath.Join("testdata", "sample.spec:3"), filepath.Join("testdata", "sample.spec:6")}, gauge.NewBuildErrors())
 
 	c.Assert(len(specs), Equals, 1)
 	c.Assert(len(specs[0].Scenarios), Equals, 2)
 }
 
-func (s *MySuite) TestSpecsFormArgsMaintainsOrderOfSpecsPassed(c *C) {
+func (s *MySuite) TestSpecsFromArgsForIndexedArgsForMultipleSpecs(c *C) {
+	sampleSpec := filepath.Join("testdata", "sample.spec")
+	sample2Spec := filepath.Join("testdata", "sample2.spec")
+	specs, _ := parseSpecsInDirs(gauge.NewConceptDictionary(), []string{sample2Spec, sampleSpec, sample2Spec + ":6"}, gauge.NewBuildErrors())
+
+	c.Assert(len(specs), Equals, 2)
+	c.Assert(len(specs[0].Scenarios), Equals, 2)
+	c.Assert(len(specs[1].Scenarios), Equals, 2)
+}
+
+func (s *MySuite) TestSpecsFromArgsMaintainsOrderOfSpecsPassed(c *C) {
 	sampleSpec := filepath.Join("testdata", "sample.spec")
 	sample2Spec := filepath.Join("testdata", "sample2.spec")
 	specs, _ := parseSpecsInDirs(gauge.NewConceptDictionary(), []string{sample2Spec, sampleSpec}, gauge.NewBuildErrors())
@@ -153,6 +149,86 @@ func (s *MySuite) TestSpecsFormArgsMaintainsOrderOfSpecsPassed(c *C) {
 	c.Assert(len(specs), Equals, 2)
 	c.Assert(specs[0].Heading.Value, Equals, "Sample 2")
 	c.Assert(specs[1].Heading.Value, Equals, "Sample")
+}
+
+func (s *MySuite) TestGetAllSpecsMaintainsOrderOfSpecs(c *C) {
+	sample2Spec := filepath.Join("testdata", "sample2.spec")
+	sampleSpec := filepath.Join("testdata", "sample.spec")
+	givenSpecs, indexedSpecs := getAllSpecFiles([]string{sample2Spec, sampleSpec})
+
+	c.Assert(len(givenSpecs), Equals, 2)
+	c.Assert(len(indexedSpecs), Equals, 2)
+
+	if !strings.HasSuffix(givenSpecs[0], sample2Spec) {
+		c.Fatalf("%s file order has changed", sample2Spec)
+	}
+	if !strings.HasSuffix(givenSpecs[1], sampleSpec) {
+		c.Fatalf("%s file order has changed", sampleSpec)
+	}
+
+	if !strings.HasSuffix(indexedSpecs[0].filePath, sample2Spec) {
+		c.Fatalf("%s file order has changed", sample2Spec)
+	}
+	c.Assert(len(indexedSpecs[0].indices), Equals, 0)
+
+	if !strings.HasSuffix(indexedSpecs[1].filePath, sampleSpec) {
+		c.Fatalf("%s file order has changed", sampleSpec)
+	}
+	c.Assert(len(indexedSpecs[1].indices), Equals, 0)
+}
+
+func (s *MySuite) TestGetAllSpecsAddIndicesForIndexedSpecs(c *C) {
+	file := filepath.Join("testdata", "sample.spec")
+	_, indexedSpecs := getAllSpecFiles([]string{file + ":1", file + ":5"})
+
+	c.Assert(len(indexedSpecs), Equals, 1)
+
+	if !strings.HasSuffix(indexedSpecs[0].filePath, file) {
+		c.Fatalf("%s file order has changed", file)
+	}
+	c.Assert(len(indexedSpecs[0].indices), Equals, 2)
+	c.Assert(indexedSpecs[0].indices[0], Equals, 1)
+	c.Assert(indexedSpecs[0].indices[1], Equals, 5)
+}
+
+func (s *MySuite) TestGetAllSpecsShouldDeDuplicateSpecs(c *C) {
+	sampleSpec := filepath.Join("testdata", "sample.spec")
+	sample2Spec := filepath.Join("testdata", "sample2.spec")
+
+	_, indexedSpecs := getAllSpecFiles([]string{sampleSpec, sample2Spec, sampleSpec, sample2Spec + ":2"})
+
+	c.Assert(len(indexedSpecs), Equals, 2)
+
+	if !strings.HasSuffix(indexedSpecs[0].filePath, sampleSpec) {
+		c.Fatalf("%s file order has changed", sampleSpec)
+	}
+
+	if !strings.HasSuffix(indexedSpecs[1].filePath, sample2Spec) {
+		c.Fatalf("%s file order has changed", sample2Spec)
+	}
+}
+
+func (s *MySuite) TestGetAllSpecsShouldDeDuplicateIndexedSpecs(c *C) {
+	sampleSpec := filepath.Join("testdata", "sample.spec")
+	sample2Spec := filepath.Join("testdata", "sample2.spec")
+
+	_, indexedSpecs := getAllSpecFiles([]string{sampleSpec + ":2", sample2Spec, sampleSpec})
+
+	c.Assert(len(indexedSpecs), Equals, 2)
+
+	if !strings.HasSuffix(indexedSpecs[0].filePath, sampleSpec) {
+		c.Fatalf("%s file order has changed", sampleSpec)
+	}
+
+	if !strings.HasSuffix(indexedSpecs[1].filePath, sample2Spec) {
+		c.Fatalf("%s file order has changed", sample2Spec)
+	}
+}
+
+func (s *MySuite) TestGetAllSpecsForIndexedNonExistingSpec(c *C) {
+	_, indexedSpecs := getAllSpecFiles([]string{"example.spec" + ":1"})
+
+	c.Assert(len(indexedSpecs), Equals, 0)
 }
 
 func (s *MySuite) TestToCheckIfItsIndexedSpec(c *C) {
@@ -165,6 +241,9 @@ func (s *MySuite) TestToCheckIfItsIndexedSpec(c *C) {
 	c.Assert(isIndexedSpec("specs/hello_world.spec"), Equals, false)
 	c.Assert(isIndexedSpec("specs/hello_world.spec:"), Equals, false)
 	c.Assert(isIndexedSpec("specs/hello_world.md"), Equals, false)
+	c.Assert(isIndexedSpec("specs:12"), Equals, false)
+	c.Assert(isIndexedSpec("specs:12/hello_world.spec:10"), Equals, true)
+	c.Assert(isIndexedSpec("SPECS/HELLO_WORLD.SPEC:10"), Equals, true)
 }
 
 func (s *MySuite) TestToObtainIndexedSpecName(c *C) {
@@ -187,6 +266,8 @@ func (s *MySuite) TestGetIndex(c *C) {
 	c.Assert(getIndex("foo"), Equals, 0)
 	c.Assert(getIndex(":"), Equals, 0)
 	c.Assert(getIndex("f:7a.spec:9"), Equals, 9)
+	c.Assert(getIndex("specs/foo.md:9"), Equals, 12)
+	c.Assert(getIndex("f:7a.md:7"), Equals, 7)
 }
 
 func staticArg(val string) *gauge.StepArg {

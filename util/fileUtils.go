@@ -18,7 +18,7 @@
 package util
 
 import (
-	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,11 +31,14 @@ import (
 
 const (
 	gaugeExcludeDirectories = "gauge_exclude_dirs"
+	cptFileExtension        = ".cpt"
+	specFileExtension       = ".spec"
+	mdFileExtension         = ".md"
 )
 
 func init() {
-	AcceptedExtensions[".spec"] = true
-	AcceptedExtensions[".md"] = true
+	AcceptedExtensions[specFileExtension] = true
+	AcceptedExtensions[mdFileExtension] = true
 }
 
 // AcceptedExtensions has all the file extensions that are supported by Gauge for its specs
@@ -47,7 +50,7 @@ func add(value string) {
 	if !filepath.IsAbs(value) {
 		path, err := filepath.Abs(filepath.Join(config.ProjectRoot, value))
 		if err != nil {
-			logger.Errorf("Error getting absolute path. %v", err)
+			logger.Errorf(true, "Error getting absolute path. %v", err)
 			return
 		}
 		value = path
@@ -94,7 +97,7 @@ func FindSpecFilesIn(dir string) []string {
 
 // IsValidSpecExtension Checks if the path has a spec file extension
 func IsValidSpecExtension(path string) bool {
-	return AcceptedExtensions[filepath.Ext(path)]
+	return AcceptedExtensions[strings.ToLower(filepath.Ext(path))]
 }
 
 // FindConceptFilesIn Finds the concept files in specified directory
@@ -111,7 +114,7 @@ func FindConceptFilesIn(dir string) []string {
 
 // IsValidConceptExtension Checks if the path has a concept file extension
 func IsValidConceptExtension(path string) bool {
-	return filepath.Ext(path) == ".cpt"
+	return strings.ToLower(filepath.Ext(path)) == cptFileExtension
 }
 
 // IsConcept Returns true if concept file
@@ -124,15 +127,34 @@ func IsSpec(path string) bool {
 	return IsValidSpecExtension(path)
 }
 
+// IsGaugeFile Returns true if spec file or concept file
+func IsGaugeFile(path string) bool {
+	return IsConcept(path) || IsSpec(path)
+}
+
+// IsGaugeFile Returns true if spec file or concept file
+func GaugeFileExtensions() []string {
+	extensions := []string{cptFileExtension}
+	for ext, val := range AcceptedExtensions {
+		if val {
+			extensions = append(extensions, ext)
+		}
+	}
+	return extensions
+}
+
 // FindAllNestedDirs returns list of all nested directories in given path
 func FindAllNestedDirs(dir string) []string {
 	var nestedDirs []string
-	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err == nil && info.IsDir() && !(path == dir) {
 			nestedDirs = append(nestedDirs, path)
 		}
 		return nil
 	})
+	if err != nil {
+		logger.Errorf(false, "Failed to find nested directories for %s: %s", dir, err.Error())
+	}
 	return nestedDirs
 }
 
@@ -145,43 +167,30 @@ func IsDir(path string) bool {
 	return fileInfo.IsDir()
 }
 
-// CreateFileIn creates a file `fileName` in given dir with its content as data
-func CreateFileIn(dir string, fileName string, data []byte) (string, error) {
-	os.MkdirAll(dir, 0755)
-	err := ioutil.WriteFile(filepath.Join(dir, fileName), data, 0644)
-	return filepath.Join(dir, fileName), err
-}
-
-//CreateDirIn creates a dir in given path
-func CreateDirIn(dir string, dirName string) (string, error) {
-	tempDir, err := ioutil.TempDir(dir, dirName)
-	fullDirName := filepath.Join(dir, dirName)
-	err = os.Rename(tempDir, fullDirName)
-	return fullDirName, err
-}
-
 // GetSpecFiles returns the list of spec files present at the given path.
 // If the path itself represents a spec file, it returns the same.
-func GetSpecFiles(path string) []string {
+var GetSpecFiles = func(paths []string) []string {
 	var specFiles []string
-	if common.DirExists(path) {
-		specFiles = append(specFiles, FindSpecFilesIn(path)...)
-	} else if common.FileExists(path) && IsValidSpecExtension(path) {
-		f, _ := filepath.Abs(path)
-		specFiles = append(specFiles, f)
+	for _, path := range paths {
+		if common.DirExists(path) {
+			specFiles = append(specFiles, FindSpecFilesIn(path)...)
+		} else if common.FileExists(path) && IsValidSpecExtension(path) {
+			f, _ := filepath.Abs(path)
+			specFiles = append(specFiles, f)
+		}
 	}
 	return specFiles
 }
 
 // GetConceptFiles returns the list of concept files present in the PROJECTROOT
-func GetConceptFiles() []string {
+var GetConceptFiles = func() []string {
 	projRoot := config.ProjectRoot
 	if projRoot == "" {
-		logger.Fatalf("Failed to get project root.")
+		logger.Fatalf(true, "Failed to get project root.")
 	}
 	absPath, err := filepath.Abs(projRoot)
 	if err != nil {
-		logger.Fatalf("Error getting absolute path. %v", err)
+		logger.Fatalf(true, "Error getting absolute path. %v", err)
 	}
 	return FindConceptFilesIn(absPath)
 }
@@ -190,7 +199,7 @@ func GetConceptFiles() []string {
 func SaveFile(fileName string, content string, backup bool) {
 	err := common.SaveFile(fileName, content, backup)
 	if err != nil {
-		logger.Errorf("Failed to refactor '%s': %s\n", fileName, err.Error())
+		logger.Errorf(true, "Failed to refactor '%s': %s\n", fileName, err.Error())
 	}
 }
 
@@ -210,11 +219,26 @@ func GetPathToFile(path string) string {
 func Remove(dir string) {
 	err := common.Remove(dir)
 	if err != nil {
-		logger.Warning("Failed to remove directory %s. Remove it manually. %s", dir, err.Error())
+		logger.Warningf(true, "Failed to remove directory %s. Remove it manually. %s", dir, err.Error())
 	}
 }
 
 // RemoveTempDir removes the temp dir
 func RemoveTempDir() {
 	Remove(common.GetTempDir())
+}
+
+// GetLinesFromText gets lines of a text in an array
+func GetLinesFromText(text string) []string {
+	text = strings.Replace(text, "\r\n", "\n", -1)
+	return strings.Split(text, "\n")
+}
+
+// GetLineCount give no of lines in given text
+func GetLineCount(text string) int {
+	return len(GetLinesFromText(text))
+}
+
+func OpenFile(fileName string) (io.Writer, error) {
+	return os.OpenFile(fileName, os.O_APPEND|os.O_WRONLY, 0600)
 }

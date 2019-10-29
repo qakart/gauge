@@ -20,13 +20,11 @@ package plugin
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,57 +36,57 @@ import (
 	"github.com/getgauge/gauge/gauge_messages"
 	"github.com/getgauge/gauge/logger"
 	"github.com/getgauge/gauge/manifest"
-	"github.com/getgauge/gauge/reporter"
+	"github.com/getgauge/gauge/plugin/pluginInfo"
 	"github.com/getgauge/gauge/version"
 	"github.com/golang/protobuf/proto"
 )
 
-const (
-	executionScope          = "execution"
-	docScope                = "documentation"
-	pluginConnectionPortEnv = "plugin_connection_port"
-	debugEnv                = "debugging"
-)
+type pluginScope string
 
-type pluginDescriptor struct {
-	ID          string
-	Version     string
-	Name        string
-	Description string
-	Command     struct {
-		Windows []string
-		Linux   []string
-		Darwin  []string
-	}
-	Scope               []string
-	GaugeVersionSupport version.VersionSupport
-	pluginPath          string
-}
+const (
+	executionScope          pluginScope = "execution"
+	docScope                pluginScope = "documentation"
+	pluginConnectionPortEnv             = "plugin_connection_port"
+)
 
 type plugin struct {
 	mutex      *sync.Mutex
 	connection net.Conn
 	pluginCmd  *exec.Cmd
 	descriptor *pluginDescriptor
+	killTimer  *time.Timer
 }
 
-func (p *plugin) IsProcessRunning() bool {
+func isProcessRunning(p *plugin) bool {
 	p.mutex.Lock()
 	ps := p.pluginCmd.ProcessState
 	p.mutex.Unlock()
 	return ps == nil || !ps.Exited()
 }
 
+func (p *plugin) rejuvenate() error {
+	if p.killTimer == nil {
+		return fmt.Errorf("timer is uninitialized. Perhaps kill is not yet invoked")
+	}
+	logger.Debugf(true, "Extending the plugin_kill_timeout for %s", p.descriptor.ID)
+	p.killTimer.Reset(config.PluginKillTimeout())
+	return nil
+}
+
 func (p *plugin) kill(wg *sync.WaitGroup) error {
 	defer wg.Done()
-	if p.IsProcessRunning() {
+	if isProcessRunning(p) {
 		defer p.connection.Close()
-		conn.SendProcessKillMessage(p.connection)
+		p.killTimer = time.NewTimer(config.PluginKillTimeout())
+		err := conn.SendProcessKillMessage(p.connection)
+		if err != nil {
+			logger.Warningf(true, "Error while killing plugin %s : %s ", p.descriptor.Name, err.Error())
+		}
 
 		exited := make(chan bool, 1)
 		go func() {
 			for {
-				if p.IsProcessRunning() {
+				if isProcessRunning(p) {
 					time.Sleep(100 * time.Millisecond)
 				} else {
 					exited <- true
@@ -97,15 +95,16 @@ func (p *plugin) kill(wg *sync.WaitGroup) error {
 			}
 		}()
 		select {
-		case done := <-exited:
-			if done {
-				logger.Debug("Plugin [%s] with pid [%d] has exited", p.descriptor.Name, p.pluginCmd.Process.Pid)
+		case <-exited:
+			if !p.killTimer.Stop() {
+				<-p.killTimer.C
 			}
-		case <-time.After(config.PluginKillTimeout()):
-			logger.Warning("Plugin [%s] with pid [%d] did not exit after %.2f seconds. Forcefully killing it.", p.descriptor.Name, p.pluginCmd.Process.Pid, config.PluginKillTimeout().Seconds())
+			logger.Debugf(true, "Plugin [%s] with pid [%d] has exited", p.descriptor.Name, p.pluginCmd.Process.Pid)
+		case <-p.killTimer.C:
+			logger.Warningf(true, "Plugin [%s] with pid [%d] did not exit after %.2f seconds. Forcefully killing it.", p.descriptor.Name, p.pluginCmd.Process.Pid, config.PluginKillTimeout().Seconds())
 			err := p.pluginCmd.Process.Kill()
 			if err != nil {
-				logger.Warning("Error while killing plugin %s : %s ", p.descriptor.Name, err.Error())
+				logger.Warningf(true, "Error while killing plugin %s : %s ", p.descriptor.Name, err.Error())
 			}
 			return err
 		}
@@ -125,11 +124,7 @@ func IsPluginInstalled(pluginName, pluginVersion string) bool {
 	}
 
 	if pluginVersion != "" {
-		pluginJSON := filepath.Join(thisPluginDir, pluginVersion, common.PluginJSONFile)
-		if common.FileExists(pluginJSON) {
-			return true
-		}
-		return false
+		return common.FileExists(filepath.Join(thisPluginDir, pluginVersion, common.PluginJSONFile))
 	}
 	return true
 }
@@ -169,24 +164,22 @@ func GetPluginDescriptorFromJSON(pluginJSON string) (*pluginDescriptor, error) {
 	return &pd, nil
 }
 
-func StartPlugin(pd *pluginDescriptor, action string) (*plugin, error) {
-	command := []string{}
+func StartPlugin(pd *pluginDescriptor, action pluginScope) (*plugin, error) {
+	var command []string
 	switch runtime.GOOS {
 	case "windows":
 		command = pd.Command.Windows
-		break
 	case "darwin":
 		command = pd.Command.Darwin
-		break
 	default:
 		command = pd.Command.Linux
-		break
 	}
 	if len(command) == 0 {
 		return nil, fmt.Errorf("Platform specific command not specified: %s.", runtime.GOOS)
 	}
 
-	cmd, err := common.ExecuteCommand(command, pd.pluginPath, reporter.Current(), reporter.Current())
+	writer := logger.NewLogWriter(pd.ID, true, 0)
+	cmd, err := common.ExecuteCommand(command, pd.pluginPath, writer.Stdout, writer.Stderr)
 
 	if err != nil {
 		return nil, err
@@ -202,8 +195,8 @@ func StartPlugin(pd *pluginDescriptor, action string) (*plugin, error) {
 	return plugin, nil
 }
 
-func SetEnvForPlugin(action string, pd *pluginDescriptor, manifest *manifest.Manifest, pluginEnvVars map[string]string) error {
-	pluginEnvVars[fmt.Sprintf("%s_action", pd.ID)] = action
+func SetEnvForPlugin(action pluginScope, pd *pluginDescriptor, manifest *manifest.Manifest, pluginEnvVars map[string]string) error {
+	pluginEnvVars[fmt.Sprintf("%s_action", pd.ID)] = string(action)
 	pluginEnvVars["test_language"] = manifest.Language
 	if err := setEnvironmentProperties(pluginEnvVars); err != nil {
 		return err
@@ -237,7 +230,7 @@ func startPluginsForExecution(manifest *manifest.Manifest) (Handler, []string) {
 	for _, pluginID := range manifest.Plugins {
 		pd, err := GetPluginDescriptor(pluginID, "")
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("Unable to start plugin %s. %s. To install, run `gauge --install %s`.", pluginID, err.Error(), pluginID))
+			warnings = append(warnings, fmt.Sprintf("Unable to start plugin %s. %s. To install, run `gauge install %s`.", pluginID, err.Error(), pluginID))
 			continue
 		}
 		compatibilityErr := version.CheckCompatibility(version.CurrentGaugeVersion, &pd.GaugeVersionSupport)
@@ -245,19 +238,25 @@ func startPluginsForExecution(manifest *manifest.Manifest) (Handler, []string) {
 			warnings = append(warnings, fmt.Sprintf("Compatible %s plugin version to current Gauge version %s not found", pd.Name, version.CurrentGaugeVersion))
 			continue
 		}
-		if isPluginValidFor(pd, executionScope) {
-			gaugeConnectionHandler, err := conn.NewGaugeConnectionHandler(0, nil)
+		if pd.hasScope(executionScope) {
+			gaugeConnectionHandler, err := conn.NewGaugeConnectionHandler(0, &keepAliveHandler{ph: handler})
 			if err != nil {
 				warnings = append(warnings, err.Error())
 				continue
 			}
 			envProperties[pluginConnectionPortEnv] = strconv.Itoa(gaugeConnectionHandler.ConnectionPortNumber())
+			prop, err := common.GetGaugeConfiguration()
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("Unable to read Gauge configuration. %s", err.Error()))
+				continue
+			}
+			envProperties["plugin_kill_timeout"] = prop["plugin_kill_timeout"]
 			err = SetEnvForPlugin(executionScope, pd, manifest, envProperties)
 			if err != nil {
 				warnings = append(warnings, fmt.Sprintf("Error setting environment for plugin %s %s. %s", pd.Name, pd.Version, err.Error()))
 				continue
 			}
-
+			logger.Debugf(true, "Starting %s plugin", pd.Name)
 			plugin, err := StartPlugin(pd, executionScope)
 			if err != nil {
 				warnings = append(warnings, fmt.Sprintf("Error starting plugin %s %s. %s", pd.Name, pd.Version, err.Error()))
@@ -266,9 +265,13 @@ func startPluginsForExecution(manifest *manifest.Manifest) (Handler, []string) {
 			pluginConnection, err := gaugeConnectionHandler.AcceptConnection(config.PluginConnectionTimeout(), make(chan error))
 			if err != nil {
 				warnings = append(warnings, fmt.Sprintf("Error starting plugin %s %s. Failed to connect to plugin. %s", pd.Name, pd.Version, err.Error()))
-				plugin.pluginCmd.Process.Kill()
+				err := plugin.pluginCmd.Process.Kill()
+				if err != nil {
+					logger.Errorf(false, "unable to kill plugin %s: %s", plugin.descriptor.Name, err.Error())
+				}
 				continue
 			}
+			logger.Debugf(true, "Established connection to %s plugin", pd.Name)
 			plugin.connection = pluginConnection
 			handler.addPlugin(pluginID, plugin)
 		}
@@ -280,37 +283,28 @@ func startPluginsForExecution(manifest *manifest.Manifest) (Handler, []string) {
 func GenerateDoc(pluginName string, specDirs []string, port int) {
 	pd, err := GetPluginDescriptor(pluginName, "")
 	if err != nil {
-		logger.Fatalf("Error starting plugin %s. Failed to get plugin.json. %s. To install, run `gauge --install %s`.", pluginName, err.Error(), pluginName)
+		logger.Fatalf(true, "Error starting plugin %s. Failed to get plugin.json. %s. To install, run `gauge install %s`.", pluginName, err.Error(), pluginName)
 	}
 	if err := version.CheckCompatibility(version.CurrentGaugeVersion, &pd.GaugeVersionSupport); err != nil {
-		logger.Fatalf("Compatible %s plugin version to current Gauge version %s not found", pd.Name, version.CurrentGaugeVersion)
+		logger.Fatalf(true, "Compatible %s plugin version to current Gauge version %s not found", pd.Name, version.CurrentGaugeVersion)
 	}
-	if !isPluginValidFor(pd, docScope) {
-		logger.Fatalf("Invalid plugin name: %s, this plugin cannot generate documentation.", pd.Name)
+	if !pd.hasScope(docScope) {
+		logger.Fatalf(true, "Invalid plugin name: %s, this plugin cannot generate documentation.", pd.Name)
 	}
 	var sources []string
 	for _, src := range specDirs {
 		path, _ := filepath.Abs(src)
 		sources = append(sources, path)
 	}
-	os.Setenv("GAUGE_SPEC_DIRS", strings.Join(sources, " "))
+	os.Setenv("GAUGE_SPEC_DIRS", strings.Join(sources, "||"))
 	os.Setenv("GAUGE_PROJECT_ROOT", config.ProjectRoot)
 	os.Setenv(common.APIPortEnvVariableName, strconv.Itoa(port))
 	p, err := StartPlugin(pd, docScope)
 	if err != nil {
-		logger.Fatalf("Error starting plugin %s %s. %s", pd.Name, pd.Version, err.Error())
+		logger.Fatalf(true, "Error starting plugin %s %s. %s", pd.Name, pd.Version, err.Error())
 	}
-	for p.IsProcessRunning() {
+	for isProcessRunning(p) {
 	}
-}
-
-func isPluginValidFor(pd *pluginDescriptor, scope string) bool {
-	for _, s := range pd.Scope {
-		if strings.ToLower(s) == scope {
-			return true
-		}
-	}
-	return false
 }
 
 func (p *plugin) sendMessage(message *gauge_messages.Message) error {
@@ -329,125 +323,20 @@ func (p *plugin) sendMessage(message *gauge_messages.Message) error {
 
 func StartPlugins(manifest *manifest.Manifest) Handler {
 	pluginHandler, warnings := startPluginsForExecution(manifest)
-	logger.HandleWarningMessages(warnings)
+	logger.HandleWarningMessages(true, warnings)
 	return pluginHandler
 }
 
-func getLatestInstalledPlugin(pluginDir string) (*PluginInfo, error) {
-	files, err := ioutil.ReadDir(pluginDir)
-	if err != nil {
-		return nil, fmt.Errorf("Error listing files in plugin directory %s: %s", pluginDir, err.Error())
-	}
-	versionToPlugins := make(map[string][]PluginInfo, 0)
-	pluginName := filepath.Base(pluginDir)
-
-	for _, file := range files {
-		if !file.IsDir() {
-			continue
-		}
-		v := file.Name()
-		if strings.Contains(file.Name(), "nightly") {
-			v = file.Name()[:strings.LastIndex(file.Name(), ".")]
-		}
-		vp, err := version.ParseVersion(v)
-		if err == nil {
-			versionToPlugins[v] = append(versionToPlugins[v], PluginInfo{pluginName, vp, filepath.Join(pluginDir, file.Name())})
-		}
-	}
-
-	if len(versionToPlugins) < 1 {
-		return nil, fmt.Errorf("No valid versions of plugin %s found in %s", pluginName, pluginDir)
-	}
-
-	var availableVersions []*version.Version
-	for k := range versionToPlugins {
-		vp, _ := version.ParseVersion(k)
-		availableVersions = append(availableVersions, vp)
-	}
-	latestVersion := version.GetLatestVersion(availableVersions)
-	latestBuild := getLatestOf(versionToPlugins[latestVersion.String()], latestVersion)
-	return &latestBuild, nil
-}
-
-func getLatestOf(plugins []PluginInfo, latestVersion *version.Version) PluginInfo {
-	for _, v := range plugins {
-		if v.Path == latestVersion.String() {
-			return v
-		}
-	}
-	sort.Sort(byPath(plugins))
-	return plugins[0]
-}
-
-func GetAllInstalledPluginsWithVersion() ([]PluginInfo, error) {
-	pluginInstallPrefixes, err := common.GetPluginInstallPrefixes()
-	if err != nil {
-		return nil, err
-	}
-	allPlugins := make(map[string]PluginInfo, 0)
-	for _, prefix := range pluginInstallPrefixes {
-		files, err := ioutil.ReadDir(prefix)
-		if err != nil {
-			return nil, err
-		}
-		for _, file := range files {
-			pluginDir, err := os.Stat(filepath.Join(prefix, file.Name()))
-			if err != nil {
-				continue
+func PluginsWithoutScope() (infos []pluginInfo.PluginInfo) {
+	if plugins, err := pluginInfo.GetAllInstalledPluginsWithVersion(); err == nil {
+		for _, p := range plugins {
+			pd, err := GetPluginDescriptor(p.Name, p.Version.String())
+			if err == nil && !pd.hasAnyScope() {
+				infos = append(infos, p)
 			}
-
-			if !pluginDir.IsDir() {
-				continue
-			}
-			latestPlugin, err := getLatestInstalledPlugin(filepath.Join(prefix, file.Name()))
-			if err != nil {
-				continue
-			}
-			allPlugins[file.Name()] = *latestPlugin
 		}
 	}
-	return sortPlugins(allPlugins), nil
-}
-
-type PluginInfo struct {
-	Name    string
-	Version *version.Version
-	Path    string
-}
-
-type byPluginName []PluginInfo
-
-func (a byPluginName) Len() int      { return len(a) }
-func (a byPluginName) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
-func (a byPluginName) Less(i, j int) bool {
-	return a[i].Name < a[j].Name
-}
-
-func sortPlugins(allPlugins map[string]PluginInfo) []PluginInfo {
-	var installedPlugins []PluginInfo
-	for _, plugin := range allPlugins {
-		installedPlugins = append(installedPlugins, plugin)
-	}
-	sort.Sort(byPluginName(installedPlugins))
-	return installedPlugins
-}
-
-type byPath []PluginInfo
-
-func (a byPath) Len() int      { return len(a) }
-func (a byPath) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
-func (a byPath) Less(i, j int) bool {
-	return a[i].Path > a[j].Path
-}
-
-func GetPluginsInfo() []PluginInfo {
-	allPluginsWithVersion, err := GetAllInstalledPluginsWithVersion()
-	if err != nil {
-		logger.Info("No plugins found")
-		logger.Info("Plugins can be installed with `gauge --install {plugin-name}`")
-		os.Exit(0)
-	}
-	return allPluginsWithVersion
+	return
 }
 
 // GetInstallDir returns the install directory of given plugin and a given version.
@@ -460,7 +349,7 @@ func GetInstallDir(pluginName, version string) (string, error) {
 	if version != "" {
 		pluginDir = filepath.Join(pluginDir, version)
 	} else {
-		latestPlugin, err := getLatestInstalledPlugin(pluginDir)
+		latestPlugin, err := pluginInfo.GetLatestInstalledPlugin(pluginDir)
 		if err != nil {
 			return "", err
 		}
@@ -482,6 +371,13 @@ func GetLanguageJSONFilePath(language string) (string, error) {
 	return languageJSON, nil
 }
 
+func IsLanguagePlugin(plugin string) bool {
+	if _, err := GetLanguageJSONFilePath(plugin); err != nil {
+		return false
+	}
+	return true
+}
+
 func QueryParams() string {
 	return fmt.Sprintf("?l=%s&p=%s&o=%s&a=%s", language(), plugins(), runtime.GOOS, runtime.GOARCH)
 }
@@ -498,7 +394,7 @@ func language() string {
 }
 
 func plugins() string {
-	pluginInfos, err := GetAllInstalledPluginsWithVersion()
+	pluginInfos, err := pluginInfo.GetAllInstalledPluginsWithVersion()
 	if err != nil {
 		return ""
 	}

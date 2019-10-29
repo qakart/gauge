@@ -18,36 +18,36 @@
 package config
 
 import (
+	"io/ioutil"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-	"io/ioutil"
-
-	"path/filepath"
-
 	"github.com/getgauge/common"
-	"github.com/op/go-logging"
+	logging "github.com/op/go-logging"
 )
 
 const (
 	gaugeRepositoryURL      = "gauge_repository_url"
-	gaugeUpdateURL          = "gauge_update_url"
 	gaugeTemplatesURL       = "gauge_templates_url"
 	runnerConnectionTimeout = "runner_connection_timeout"
 	pluginConnectionTimeout = "plugin_connection_timeout"
 	pluginKillTimeOut       = "plugin_kill_timeout"
 	runnerRequestTimeout    = "runner_request_timeout"
+	ideRequestTimeout       = "ide_request_timeout"
 	checkUpdates            = "check_updates"
-	analyticsEnabled        = "gauge_analytics_enabled"
-	analyticsLoggingEnabled = "gauge_analytics_log_enabled"
+	telemetryEnabled        = "gauge_telemetry_enabled"
+	telemetryConsent        = "gauge_telemetry_action_recorded"
+	telemetryLoggingEnabled = "gauge_telemetry_log_enabled"
 
 	defaultRunnerConnectionTimeout = time.Second * 25
 	defaultPluginConnectionTimeout = time.Second * 10
 	defaultPluginKillTimeout       = time.Second * 4
 	defaultRefactorTimeout         = time.Second * 10
-	defaultRunnerRequestTimeout    = time.Second * 3
+	defaultRunnerRequestTimeout    = time.Second * 30
+	defaultIdeRequestTimeout       = time.Second * 30
 	LayoutForTimeStamp             = "Jan 2, 2006 at 3:04pm"
 )
 
@@ -92,14 +92,18 @@ func RunnerRequestTimeout() time.Duration {
 	return convertToTime(intervalString, defaultRunnerRequestTimeout, runnerRequestTimeout)
 }
 
+// Timeout in milliseconds for requests from the grpc language runner.
+func IdeRequestTimeout() time.Duration {
+	intervalString := os.Getenv(ideRequestTimeout)
+	if intervalString == "" {
+		intervalString = getFromConfig(ideRequestTimeout)
+	}
+	return convertToTime(intervalString, defaultIdeRequestTimeout, ideRequestTimeout)
+}
+
 // GaugeRepositoryUrl fetches the repository URL to locate plugins
 func GaugeRepositoryUrl() string {
 	return getFromConfig(gaugeRepositoryURL)
-}
-
-// GaugeUpdateUrl fetches the URL to be used to check updates
-func GaugeUpdateUrl() string {
-	return getFromConfig(gaugeUpdateURL)
 }
 
 // GaugeTemplatesUrl fetches the URL to be used to download project templates
@@ -107,16 +111,42 @@ func GaugeTemplatesUrl() string {
 	return getFromConfig(gaugeTemplatesURL)
 }
 
-// AnalyticsEnabled determines if sending data to analytics is enabled
-func AnalyticsEnabled() bool {
-	e := getFromConfig(analyticsEnabled)
-	return convertToBool(e, analyticsEnabled, true)
+// TelemetryEnabled determines if sending data to gauge telemetry engine is enabled
+func TelemetryEnabled() bool {
+	e := os.Getenv(strings.ToUpper(telemetryEnabled))
+	if e == "" {
+		e = getFromConfig(telemetryEnabled)
+	}
+	return convertToBool(e, telemetryEnabled, true)
 }
 
-// AnalyticsLogEnabled determines if requests to analytics have to be logged
-func AnalyticsLogEnabled() bool {
-	log := getFromConfig(analyticsLoggingEnabled)
-	return convertToBool(log, analyticsLoggingEnabled, false)
+// TelemetryLogEnabled determines if requests to gauge telemetry engine have to be logged
+func TelemetryLogEnabled() bool {
+	log := getFromConfig(telemetryLoggingEnabled)
+	return convertToBool(log, telemetryLoggingEnabled, false)
+}
+
+// TelemetryConsent determines if user has opted in/out of telemetry either via config or by setting
+// GAUGE_TELEMETRY_ENABLED environment variable
+func TelemetryConsent() bool {
+	e := os.Getenv(strings.ToUpper(telemetryEnabled))
+	if e != "" {
+		return true
+	}
+	consentVal := getFromConfig(telemetryConsent)
+	consent, err := strconv.ParseBool(strings.TrimSpace(consentVal))
+	if err != nil {
+		return false
+	}
+	return consent
+}
+
+// RecordTelemetryConsentSet records that user has opted in/out
+func RecordTelemetryConsentSet() {
+	err := Update(telemetryConsent, "true")
+	if err != nil {
+		APILog.Warningf("Unable to update configuration: %s", telemetryConsent)
+	}
 }
 
 // SetProjectRoot sets project root location in ENV.
@@ -140,13 +170,13 @@ func SetProjectRoot(args []string) error {
 func UniqueID() string {
 	configDir, err := common.GetConfigurationDir()
 	if err != nil {
-		APILog.Warning("Unable to read config dir, %s", err)
+		APILog.Warningf("Unable to read config dir, %s", err)
 		return ""
 	}
 	idFile := filepath.Join(configDir, "id")
 	s, err := ioutil.ReadFile(idFile)
 	if err != nil {
-		APILog.Warning("Unable to read %s", idFile)
+		APILog.Warningf("Unable to read %s", idFile)
 		return ""
 	}
 	return string(s)
@@ -159,7 +189,7 @@ func setCurrentProjectEnvVariable() error {
 func convertToTime(value string, defaultValue time.Duration, name string) time.Duration {
 	intValue, err := strconv.Atoi(value)
 	if err != nil {
-		APILog.Warning("Incorrect value for %s in property file. Cannot convert %s to time", name, value)
+		APILog.Warningf("Incorrect value for %s in property file. Cannot convert %s to time", name, value)
 		return defaultValue
 	}
 	return time.Millisecond * time.Duration(intValue)
@@ -168,7 +198,7 @@ func convertToTime(value string, defaultValue time.Duration, name string) time.D
 func convertToBool(value string, property string, defaultValue bool) bool {
 	boolValue, err := strconv.ParseBool(strings.TrimSpace(value))
 	if err != nil {
-		APILog.Warning("Incorrect value for %s in property file. Cannot convert %s to boolean.", property, value)
+		APILog.Warningf("Incorrect value for %s in property file. Cannot convert %s to boolean.", property, value)
 		return defaultValue
 	}
 	return boolValue
@@ -177,7 +207,7 @@ func convertToBool(value string, property string, defaultValue bool) bool {
 var getFromConfig = func(propertyName string) string {
 	config, err := common.GetGaugeConfiguration()
 	if err != nil {
-		APILog.Warning("Failed to get configuration from Gauge properties file. Error: %s", err.Error())
+		APILog.Warningf("Failed to get configuration from Gauge properties file. Error: %s", err.Error())
 		return ""
 	}
 	return config[propertyName]

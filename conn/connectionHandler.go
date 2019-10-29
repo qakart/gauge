@@ -23,6 +23,8 @@ import (
 	"net"
 	"time"
 
+	"github.com/getgauge/gauge/logger"
+
 	"github.com/golang/protobuf/proto"
 )
 
@@ -37,7 +39,11 @@ type GaugeConnectionHandler struct {
 
 func NewGaugeConnectionHandler(port int, messageHandler messageHandler) (*GaugeConnectionHandler, error) {
 	// port = 0 means GO will find a unused port
-	listener, err := net.ListenTCP("tcp", &net.TCPAddr{Port: port})
+	address, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return nil, err
+	}
+	listener, err := net.ListenTCP("tcp", address)
 	if err != nil {
 		return nil, err
 	}
@@ -102,13 +108,19 @@ func (connectionHandler *GaugeConnectionHandler) handleConnectionMessages(conn n
 	for {
 		n, err := conn.Read(data)
 		if err != nil {
-			conn.Close()
-			//TODO: Move to file
-			//			logger.Log.Println(fmt.Sprintf("Closing connection [%s] cause: %s", connectionHandler.conn.RemoteAddr(), err.Error()))
+			e := conn.Close()
+			if e != nil {
+				logger.Debugf(false, "Connection already closed, %s", e.Error())
+			}
+			logger.Infof(false, "Closing connection [%s] cause: %s", conn.RemoteAddr(), err.Error())
 			return
 		}
 
-		buffer.Write(data[0:n])
+		_, err = buffer.Write(data[0:n])
+		if err != nil {
+			logger.Infof(false, "Unable to write to buffer, %s", err.Error())
+			return
+		}
 		connectionHandler.processMessage(buffer, conn)
 	}
 }
@@ -118,7 +130,7 @@ func (connectionHandler *GaugeConnectionHandler) processMessage(buffer *bytes.Bu
 		messageLength, bytesRead := proto.DecodeVarint(buffer.Bytes())
 		if messageLength > 0 && messageLength < uint64(buffer.Len()) {
 			messageBoundary := int(messageLength) + bytesRead
-			receivedBytes := buffer.Bytes()[bytesRead : messageLength+uint64(bytesRead)]
+			receivedBytes := buffer.Bytes()[bytesRead:messageBoundary]
 			connectionHandler.messageHandler.MessageBytesReceived(receivedBytes, conn)
 			buffer.Next(messageBoundary)
 			if buffer.Len() == 0 {
@@ -133,7 +145,10 @@ func (connectionHandler *GaugeConnectionHandler) processMessage(buffer *bytes.Bu
 // HandleMultipleConnections accepts multiple connections and Handler responds to incoming messages
 func (connectionHandler *GaugeConnectionHandler) HandleMultipleConnections() {
 	for {
-		connectionHandler.acceptConnectionWithoutTimeout()
+		_, err := connectionHandler.acceptConnectionWithoutTimeout()
+		if err != nil {
+			logger.Fatalf(true, "Unable to connect to runner: %s", err.Error())
+		}
 	}
 
 }

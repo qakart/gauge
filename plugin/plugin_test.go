@@ -1,4 +1,4 @@
-// Copyright 2015 ThoughtWorks, Inc.
+// Copyright 2018 ThoughtWorks, Inc.
 
 // This file is part of Gauge.
 
@@ -19,208 +19,131 @@ package plugin
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
+	"github.com/getgauge/common"
 	"github.com/getgauge/gauge/config"
+	"github.com/getgauge/gauge/plugin/pluginInfo"
 	"github.com/getgauge/gauge/version"
-
-	. "gopkg.in/check.v1"
 )
 
-func Test(t *testing.T) { TestingT(t) }
-
-type MySuite struct{}
-
-var _ = Suite(&MySuite{})
-
-func (s *MySuite) TestSortingOfPluginInfos(c *C) {
-	plugins := make(map[string]PluginInfo)
-	plugins["e"] = PluginInfo{Name: "e"}
-	plugins["b"] = PluginInfo{Name: "b"}
-	plugins["c"] = PluginInfo{Name: "c"}
-	plugins["d"] = PluginInfo{Name: "d"}
-	plugins["a"] = PluginInfo{Name: "a"}
-
-	actual := sortPlugins(plugins)
-
-	var expected []PluginInfo
-	expected = append(expected, PluginInfo{Name: "a"})
-	expected = append(expected, PluginInfo{Name: "b"})
-	expected = append(expected, PluginInfo{Name: "c"})
-	expected = append(expected, PluginInfo{Name: "d"})
-	expected = append(expected, PluginInfo{Name: "e"})
-
-	c.Assert(len(expected), Equals, len(plugins))
-	for i := range expected {
-		c.Assert(expected[i], Equals, actual[i])
-	}
-}
-
-func (s *MySuite) TestGetLatestPluginPath(c *C) {
-	path, _ := filepath.Abs(filepath.Join("_testdata", "java"))
-
-	latestVersion, err := getLatestInstalledPlugin(path)
-
-	c.Assert(err, Equals, nil)
-	c.Assert(latestVersion.Version.String(), Equals, "1.2.0")
-	c.Assert(latestVersion.Name, Equals, "java")
-	c.Assert(latestVersion.Path, Equals, filepath.Join(path, "1.2.0"))
-}
-
-func (s *MySuite) TestGetLatestPluginPathIfNoPluginsFound(c *C) {
-	testData := "_testdata"
-	path, _ := filepath.Abs(testData)
-
-	_, err := getLatestInstalledPlugin(path)
-
-	c.Assert(err.Error(), Equals, fmt.Sprintf("No valid versions of plugin %s found in %s", testData, path))
-}
-
-func (s *MySuite) TestGetLatestInstalledPlugin(c *C) {
-	path, _ := filepath.Abs(filepath.Join("_testdata", "java"))
-
-	latestPlugin, err := getLatestInstalledPlugin(path)
-
-	c.Assert(err, Equals, nil)
-	c.Assert(latestPlugin.Path, Equals, filepath.Join(path, "1.2.0"))
-}
-
-func (s *MySuite) TestGetLatestInstalledPluginIfNoPluginsFound(c *C) {
-	testData := "_testdata"
-	path, _ := filepath.Abs(testData)
-
-	_, err := getLatestInstalledPlugin(path)
-
-	c.Assert(err.Error(), Equals, fmt.Sprintf("No valid versions of plugin %s found in %s", testData, path))
-}
-
-func (s *MySuite) TestGetPluginDescriptorFromJSON(c *C) {
+func TestGetPluginDescriptorFromJSON(t *testing.T) {
 	testData := "_testdata"
 	path, _ := filepath.Abs(testData)
 
 	pd, err := GetPluginDescriptorFromJSON(filepath.Join(path, "_test.json"))
 
-	c.Assert(err, Equals, nil)
-	c.Assert(pd.ID, Equals, "html-report")
-	c.Assert(pd.Version, Equals, "1.1.0")
-	c.Assert(pd.Name, Equals, "Html Report")
-	c.Assert(pd.Description, Equals, "Html reporting plugin")
-	c.Assert(pd.pluginPath, Equals, path)
-	c.Assert(pd.GaugeVersionSupport.Minimum, Equals, "0.2.0")
-	c.Assert(pd.GaugeVersionSupport.Maximum, Equals, "0.4.0")
-	c.Assert(pd.Scope, DeepEquals, []string{"Execution"})
+	if err != nil {
+		t.Errorf("error: %s", err.Error())
+	}
+	t.Run("ID", func(t *testing.T) {
+		if pd.ID != "html-report" {
+			t.Errorf("expected %s, got %s", "html-report", pd.ID)
+		}
+	})
+	t.Run("Version", func(t *testing.T) {
+		if pd.Version != "1.1.0" {
+			t.Errorf("expected %s, got %s", "1.1.0", pd.Version)
+		}
+	})
+	t.Run("Name", func(t *testing.T) {
+		if pd.Name != "Html Report" {
+			t.Errorf("expected %s, got %s", "Html Report", pd.Name)
+		}
+	})
+	t.Run("Description", func(t *testing.T) {
+		if pd.Description != "Html reporting plugin" {
+			t.Errorf("expected %s, got %s", "Html reporting plugin", pd.Name)
+		}
+	})
+	t.Run("Path", func(t *testing.T) {
+		if pd.pluginPath != path {
+			t.Errorf("expected %s, got %s", path, pd.pluginPath)
+		}
+	})
+	t.Run("Min Version", func(t *testing.T) {
+		if pd.GaugeVersionSupport.Minimum != "0.2.0" {
+			t.Errorf("expected %s, got %s", "0.2.0", pd.GaugeVersionSupport.Minimum)
+		}
+	})
+	t.Run("Max Version", func(t *testing.T) {
+		if pd.GaugeVersionSupport.Maximum != "0.4.0" {
+			t.Errorf("expected %s, got %s", "0.4.0", pd.GaugeVersionSupport.Maximum)
+		}
+	})
+	t.Run("Scope", func(t *testing.T) {
+		if !reflect.DeepEqual(pd.Scope, []string{"Execution"}) {
+			t.Errorf("expected %s, got %s", []string{"Execution"}, pd.Scope)
+		}
+	})
 	htmlCommand := []string{"bin/html-report"}
-	c.Assert(pd.Command.Windows, DeepEquals, htmlCommand)
-	c.Assert(pd.Command.Darwin, DeepEquals, htmlCommand)
-	c.Assert(pd.Command.Linux, DeepEquals, htmlCommand)
+	t.Run("Windows Command", func(t *testing.T) {
+		if !reflect.DeepEqual(pd.Command.Windows, htmlCommand) {
+			t.Errorf("expected %s, got %s", htmlCommand, pd.Command.Windows)
+		}
+	})
+	t.Run("Darwin Command", func(t *testing.T) {
+		if !reflect.DeepEqual(pd.Command.Darwin, htmlCommand) {
+			t.Errorf("expected %s, got %s", htmlCommand, pd.Command.Darwin)
+		}
+	})
+	t.Run("Linux Command", func(t *testing.T) {
+		if !reflect.DeepEqual(pd.Command.Linux, htmlCommand) {
+			t.Errorf("expected %s, got %s", htmlCommand, pd.Command.Linux)
+		}
+	})
 }
 
-func (s *MySuite) TestGetPluginDescriptorFromNonExistingJSON(c *C) {
+func TestGetPluginDescriptorFromNonExistingJSON(t *testing.T) {
 	testData := "_testdata"
 	path, _ := filepath.Abs(testData)
 	JSONPath := filepath.Join(path, "_test1.json")
 	_, err := GetPluginDescriptorFromJSON(JSONPath)
 
-	c.Assert(err, DeepEquals, fmt.Errorf("File %s doesn't exist.", JSONPath))
+	expected := fmt.Errorf("File %s doesn't exist.", JSONPath)
+	if err.Error() != expected.Error() {
+		t.Errorf("expected %s, got %s", expected, err)
+	}
 }
 
-func (s *MySuite) TestLatestVersionWithOnlyStableVersion(c *C) {
-	v, _ := version.ParseVersion("0.2.2")
-
-	pluginInfo1 := PluginInfo{Version: v, Path: "0.2.2"}
-	plugins := []PluginInfo{pluginInfo1}
-	latestBuild := getLatestOf(plugins, v)
-
-	c.Assert(latestBuild.Version, Equals, v)
-	c.Assert(latestBuild.Version, Equals, v)
-}
-
-func (s *MySuite) TestLatestVersionWithOnlyNightlyVersion(c *C) {
-	v, _ := version.ParseVersion("0.2.2")
-
-	pluginInfo1 := PluginInfo{Version: v, Path: "0.2.2.nightly-2016-02-09"}
-	plugins := []PluginInfo{pluginInfo1}
-	latestBuild := getLatestOf(plugins, v)
-
-	c.Assert(latestBuild.Version, Equals, v)
-	c.Assert(latestBuild.Version, Equals, v)
-}
-
-func (s *MySuite) TestLatestVersionWithDifferentYearNightlies(c *C) {
-	v, _ := version.ParseVersion("0.2.2")
-
-	pluginInfo1 := PluginInfo{Version: v, Path: "0.2.2.nightly-2015-02-09"}
-	pluginInfo2 := PluginInfo{Version: v, Path: "0.2.2.nightly-2016-02-09"}
-	pluginInfo3 := PluginInfo{Version: v, Path: "0.2.2.nightly-2017-02-09"}
-	plugins := []PluginInfo{pluginInfo1, pluginInfo3, pluginInfo2}
-	latestBuild := getLatestOf(plugins, v)
-
-	c.Assert(latestBuild.Path, Equals, pluginInfo3.Path)
-	c.Assert(latestBuild.Version, Equals, v)
-}
-
-func (s *MySuite) TestLatestVersionWithDifferentMonthNightlies(c *C) {
-	v, _ := version.ParseVersion("0.2.2")
-
-	pluginInfo1 := PluginInfo{Version: v, Path: "0.2.2.nightly-2016-03-03"}
-	pluginInfo2 := PluginInfo{Version: v, Path: "0.2.2.nightly-2016-02-03"}
-	plugins := []PluginInfo{pluginInfo1, pluginInfo2}
-	latestBuild := getLatestOf(plugins, v)
-
-	c.Assert(latestBuild.Path, Equals, pluginInfo1.Path)
-	c.Assert(latestBuild.Version, Equals, v)
-}
-
-func (s *MySuite) TestLatestVersionWithDifferentDaysNightlies(c *C) {
-	v, _ := version.ParseVersion("0.2.2")
-
-	pluginInfo1 := PluginInfo{Version: v, Path: "0.2.2.nightly-2016-02-03"}
-	pluginInfo2 := PluginInfo{Version: v, Path: "0.2.2.nightly-2016-02-09"}
-	plugins := []PluginInfo{pluginInfo1, pluginInfo2}
-	latestBuild := getLatestOf(plugins, v)
-
-	c.Assert(latestBuild.Path, Equals, pluginInfo2.Path)
-	c.Assert(latestBuild.Version, Equals, v)
-}
-
-func (s *MySuite) TestLatestNightlyVersionWithDifferentStableVersion(c *C) {
-	v, _ := version.ParseVersion("0.2.2")
-
-	pluginInfo1 := PluginInfo{Version: v, Path: "0.2.2.nightly-2016-02-09"}
-	pluginInfo2 := PluginInfo{Version: v, Path: "0.2.3.nightly-2016-02-09"}
-	plugins := []PluginInfo{pluginInfo1, pluginInfo2}
-	latestBuild := getLatestOf(plugins, v)
-
-	c.Assert(latestBuild.Path, Equals, pluginInfo2.Path)
-	c.Assert(latestBuild.Version, Equals, v)
-}
-
-func (s *MySuite) TestLatestNightlyVersionWithDifferentDates(c *C) {
-	v, _ := version.ParseVersion("0.2.2")
-
-	pluginInfo1 := PluginInfo{Version: v, Path: "2.1.1.nightly-2016-05-02"}
-	pluginInfo2 := PluginInfo{Version: v, Path: "2.1.1.nightly-2016-04-27"}
-	plugins := []PluginInfo{pluginInfo1, pluginInfo2}
-	latestBuild := getLatestOf(plugins, v)
-
-	c.Assert(latestBuild.Path, Equals, pluginInfo1.Path)
-	c.Assert(latestBuild.Version, Equals, v)
-}
-
-func (s *MySuite) TestGetLanguageQueryParamWhenProjectRootNotSet(c *C) {
+func TestGetLanguageQueryParamWhenProjectRootNotSet(t *testing.T) {
 	config.ProjectRoot = ""
 
 	l := language()
 
-	c.Assert(l, Equals, "")
+	if l != "" {
+		t.Errorf("expected empty language, got %s", l)
+	}
 }
 
-func (s *MySuite) TestGetLanguageQueryParam(c *C) {
+func TestGetLanguageQueryParam(t *testing.T) {
 	path, _ := filepath.Abs(filepath.Join("_testdata", "sample"))
 	config.ProjectRoot = path
 
 	l := language()
 
-	c.Assert(l, Equals, "java")
+	if l != "java" {
+		t.Errorf("expected java, got %s", l)
+	}
+}
+
+func TestGetPluginsWithoutScope(t *testing.T) {
+	path, _ := filepath.Abs(filepath.Join("_testdata"))
+	os.Setenv(common.GaugeHome, path)
+
+	got := PluginsWithoutScope()
+
+	want := []pluginInfo.PluginInfo{
+		{
+			Name:    "noscope",
+			Version: &version.Version{Major: 1, Minor: 0, Patch: 0},
+			Path:    filepath.Join(path, "plugins", "noscope", "1.0.0"),
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Failed GetPluginWithoutScope.\n\tWant: %v\n\tGot: %v", want, got)
+	}
 }

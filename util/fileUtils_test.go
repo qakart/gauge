@@ -52,7 +52,7 @@ Scenario 1
 ----------
 * say hello
 `)
-	spec1, err := CreateFileIn(dir, "gaugeSpec1.spec", data)
+	spec1, err := createFileIn(dir, "gaugeSpec1.spec", data)
 	c.Assert(err, Equals, nil)
 
 	dataRead, err := ioutil.ReadFile(spec1)
@@ -60,7 +60,7 @@ Scenario 1
 	c.Assert(string(dataRead), Equals, string(data))
 	c.Assert(len(FindSpecFilesIn(dir)), Equals, 1)
 
-	_, err = CreateFileIn(dir, "gaugeSpec2.spec", data)
+	_, err = createFileIn(dir, "gaugeSpec2.spec", data)
 	c.Assert(err, Equals, nil)
 
 	c.Assert(len(FindSpecFilesIn(dir)), Equals, 2)
@@ -68,31 +68,51 @@ Scenario 1
 
 func (s *MySuite) TestFindAllConceptFiles(c *C) {
 	data := []byte(`#Concept Heading`)
-	_, err := CreateFileIn(dir, "concept1.cpt", data)
+	_, err := createFileIn(dir, "concept1.cpt", data)
 	c.Assert(err, Equals, nil)
 	c.Assert(len(FindConceptFilesIn(dir)), Equals, 1)
 
-	_, err = CreateFileIn(dir, "concept2.cpt", data)
+	_, err = createFileIn(dir, "concept2.cpt", data)
 	c.Assert(err, Equals, nil)
 	c.Assert(len(FindConceptFilesIn(dir)), Equals, 2)
+}
+
+func (s *MySuite) TestIsValidSpecExension(c *C) {
+	c.Assert(IsValidSpecExtension("/home/user/foo/myspec.spec"), Equals, true)
+	c.Assert(IsValidSpecExtension("/home/user/foo/myspec.sPeC"), Equals, true)
+	c.Assert(IsValidSpecExtension("/home/user/foo/myspec.SPEC"), Equals, true)
+	c.Assert(IsValidSpecExtension("/home/user/foo/myspec.md"), Equals, true)
+	c.Assert(IsValidSpecExtension("/home/user/foo/myspec.MD"), Equals, true)
+	c.Assert(IsValidSpecExtension("/home/user/foo/myconcept.cpt"), Equals, false)
+}
+
+func (s *MySuite) TestIsValidConcpetExension(c *C) {
+	c.Assert(IsValidConceptExtension("/home/user/foo/myconcept.cpt"), Equals, true)
+	c.Assert(IsValidConceptExtension("/home/user/foo/myconcept.CPT"), Equals, true)
+	c.Assert(IsValidConceptExtension("/home/user/foo/myconcept.cPt"), Equals, true)
+	c.Assert(IsValidConceptExtension("/home/user/foo/myspec.spC"), Equals, false)
 }
 
 func (s *MySuite) TestFindAllConceptFilesShouldFilterDirectoriesThatAreSkipped(c *C) {
 	config.ProjectRoot = dir
 	data := []byte(`#Concept Heading`)
-	git, _ := CreateDirIn(dir, ".git")
-	bin, _ := CreateDirIn(dir, "gauge_bin")
-	reports, _ := CreateDirIn(dir, "reports")
-	env, _ := CreateDirIn(dir, "env")
+	git, _ := createDirIn(dir, ".git")
+	bin, _ := createDirIn(dir, "gauge_bin")
+	reports, _ := createDirIn(dir, "reports")
+	env, _ := createDirIn(dir, "env")
 
-	CreateFileIn(git, "concept1.cpt", data)
-	CreateFileIn(bin, "concept2.cpt", data)
-	CreateFileIn(reports, "concept3.cpt", data)
-	CreateFileIn(env, "concept4.cpt", data)
+	_, err := createFileIn(git, "concept1.cpt", data)
+	c.Assert(err, IsNil)
+	_, err = createFileIn(bin, "concept2.cpt", data)
+	c.Assert(err, IsNil)
+	_, err = createFileIn(reports, "concept3.cpt", data)
+	c.Assert(err, IsNil)
+	_, err = createFileIn(env, "concept4.cpt", data)
+	c.Assert(err, IsNil)
 
 	c.Assert(len(FindConceptFilesIn(dir)), Equals, 0)
 
-	_, err := CreateFileIn(dir, "concept2.cpt", data)
+	_, err = createFileIn(dir, "concept2.cpt", data)
 	c.Assert(err, Equals, nil)
 	c.Assert(len(FindConceptFilesIn(dir)), Equals, 1)
 }
@@ -101,14 +121,14 @@ func (s *MySuite) TestFindAllConceptFilesInNestedDir(c *C) {
 	data := []byte(`#Concept Heading
 * Say "hello" to gauge
 `)
-	_, err := CreateFileIn(dir, "concept1.cpt", data)
+	_, err := createFileIn(dir, "concept1.cpt", data)
 	c.Assert(err, Equals, nil)
 	c.Assert(len(FindConceptFilesIn(dir)), Equals, 1)
 
 	dir1, err := ioutil.TempDir(dir, "gaugeTest1")
 	c.Assert(err, Equals, nil)
 
-	_, err = CreateFileIn(dir1, "concept2.cpt", data)
+	_, err = createFileIn(dir1, "concept2.cpt", data)
 	c.Assert(err, Equals, nil)
 	c.Assert(len(FindConceptFilesIn(dir)), Equals, 2)
 }
@@ -135,10 +155,14 @@ func (s *MySuite) TestFindAllNestedDirs(c *C) {
 	nested2 := filepath.Join(dir, "nested2")
 	nested3 := filepath.Join(dir, "nested2", "deep")
 	nested4 := filepath.Join(dir, "nested2", "deep", "deeper")
-	os.Mkdir(nested1, 0755)
-	os.Mkdir(nested2, 0755)
-	os.Mkdir(nested3, 0755)
-	os.Mkdir(nested4, 0755)
+	err := os.Mkdir(nested1, 0755)
+	c.Assert(err, IsNil)
+	err = os.Mkdir(nested2, 0755)
+	c.Assert(err, IsNil)
+	err = os.Mkdir(nested3, 0755)
+	c.Assert(err, IsNil)
+	err = os.Mkdir(nested4, 0755)
+	c.Assert(err, IsNil)
 
 	nestedDirs := FindAllNestedDirs(dir)
 	c.Assert(len(nestedDirs), Equals, 4)
@@ -178,4 +202,24 @@ func (s *MySuite) TestGetPathToFile(c *C) {
 
 	path = GetPathToFile("resources")
 	c.Assert(path, Equals, filepath.Join(config.ProjectRoot, "resources"))
+}
+
+func createFileIn(dir string, fileName string, data []byte) (string, error) {
+	err := os.MkdirAll(dir, 0755)
+	if err != nil {
+		return "", err
+	}
+	err = ioutil.WriteFile(filepath.Join(dir, fileName), data, 0644)
+	return filepath.Join(dir, fileName), err
+}
+
+func createDirIn(dir string, dirName string) (string, error) {
+	tempDir, err := ioutil.TempDir(dir, dirName)
+	if err != nil {
+		return "", err
+	}
+
+	fullDirName := filepath.Join(dir, dirName)
+	err = os.Rename(tempDir, fullDirName)
+	return fullDirName, err
 }

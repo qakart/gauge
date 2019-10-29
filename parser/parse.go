@@ -15,10 +15,30 @@
 // You should have received a copy of the GNU General Public License
 // along with Gauge.  If not, see <http://www.gnu.org/licenses/>.
 
+/*Package parser parses all the specs in the list of directories given and also de-duplicates all specs passed through `specDirs` before parsing specs.
+  Gets all the specs files in the given directory and generates token for each spec file.
+  While parsing a concept file, concepts are inlined i.e. concept in the spec file is replaced with steps that concept has in the concept file.
+  While creating a specification file parser applies the converter functions.
+  Parsing a spec file gives a specification with parseresult. ParseResult contains ParseErrors, CriticalErrors, Warnings and FileName
+
+  Errors can be generated, While
+	- Generating tokens
+	- Applying converters
+	- After Applying converters
+
+  If a parse error is found in a spec, only that spec is ignored and others will continue execution.
+  This doesn't invoke the language runner.
+  Eg : Multiple spec headings found in same file.
+       Scenario should be defined after the spec heading.
+
+  Critical error :
+  	Circular reference of concepts - Doesn't parse specs becz it goes in recursion and crashes
+*/
 package parser
 
 import (
 	"strings"
+	"sync"
 
 	"regexp"
 	"strconv"
@@ -31,110 +51,182 @@ import (
 	"github.com/getgauge/gauge/util"
 )
 
+// ParseSpecFiles gets all the spec files and parse each spec file.
+// Generates specifications and parse results.
 // TODO: Use single channel instead of one for spec and another for result, so that mapping is consistent
+
+type parseInfo struct {
+	parseResult *ParseResult
+	spec        *gauge.Specification
+}
+
+func newParseInfo(spec *gauge.Specification, pr *ParseResult) *parseInfo {
+	return &parseInfo{spec: spec, parseResult: pr}
+}
+
+func parse(wg *sync.WaitGroup, sfc *specFileCollection, cpt *gauge.ConceptDictionary, piChan chan *parseInfo) {
+	defer wg.Done()
+	for {
+		if s, err := sfc.Next(); err == nil {
+			piChan <- newParseInfo(parseSpec(s, cpt))
+		} else {
+			return
+		}
+	}
+}
+
+func parseSpecFiles(sfc *specFileCollection, conceptDictionary *gauge.ConceptDictionary, piChan chan *parseInfo, limit int) {
+	wg := &sync.WaitGroup{}
+	for i := 0; i < limit; i++ {
+		wg.Add(1)
+		go parse(wg, sfc, conceptDictionary, piChan)
+	}
+	wg.Wait()
+	close(piChan)
+}
+
 func ParseSpecFiles(specFiles []string, conceptDictionary *gauge.ConceptDictionary, buildErrors *gauge.BuildErrors) ([]*gauge.Specification, []*ParseResult) {
-	parseResultsChan := make(chan *ParseResult, len(specFiles))
-	specsChan := make(chan *gauge.Specification, len(specFiles))
+	sfc := NewSpecFileCollection(specFiles)
+	piChan := make(chan *parseInfo)
+	limit := len(specFiles)
+	rLimit, e := util.RLimit()
+	if e == nil && rLimit < limit {
+		logger.Debugf(true, "No of specifcations %d is higher than Max no of open file descriptors %d.\n"+
+			"Starting %d routines for parallel parsing.", limit, rLimit, rLimit/2)
+		limit = rLimit / 2
+	}
+	go parseSpecFiles(sfc, conceptDictionary, piChan, limit)
 	var parseResults []*ParseResult
 	var specs []*gauge.Specification
-
-	for _, specFile := range specFiles {
-		go parseSpec(specFile, conceptDictionary, specsChan, parseResultsChan)
-	}
-	for range specFiles {
-		parseRes := <-parseResultsChan
-		spec := <-specsChan
-		if spec != nil {
-			specs = append(specs, spec)
+	for r := range piChan {
+		if r.spec != nil {
+			specs = append(specs, r.spec)
 			var parseErrs []error
-			for _, e := range parseRes.CriticalErrors {
-				parseErrs = append(parseErrs, e)
-			}
-			for _, e := range parseRes.ParseErrors {
+			for _, e := range r.parseResult.ParseErrors {
 				parseErrs = append(parseErrs, e)
 			}
 			if len(parseErrs) != 0 {
-				buildErrors.SpecErrs[spec] = parseErrs
+				buildErrors.SpecErrs[r.spec] = parseErrs
 			}
 		}
-		parseResults = append(parseResults, parseRes)
+		parseResults = append(parseResults, r.parseResult)
 	}
 	return specs, parseResults
 }
 
+// ParseSpecs parses specs in the give directory and gives specification and pass/fail status, used in validation.
 func ParseSpecs(args []string, conceptsDictionary *gauge.ConceptDictionary, buildErrors *gauge.BuildErrors) ([]*gauge.Specification, bool) {
 	specs, failed := parseSpecsInDirs(conceptsDictionary, args, buildErrors)
 	specsToExecute := order.Sort(filter.FilterSpecs(specs))
 	return specsToExecute, failed
 }
 
-func ParseConcepts() (*gauge.ConceptDictionary, *ParseResult) {
-	conceptsDictionary, conceptParseResult := CreateConceptsDictionary()
+// ParseConcepts creates concept dictionary and concept parse result.
+func ParseConcepts() (*gauge.ConceptDictionary, *ParseResult, error) {
+	logger.Debug(true, "Started concepts parsing.")
+	conceptsDictionary, conceptParseResult, err := CreateConceptsDictionary()
+	if err != nil {
+		return nil, nil, err
+	}
 	HandleParseResult(conceptParseResult)
-	return conceptsDictionary, conceptParseResult
+	logger.Debugf(true, "%d concepts parsing completed.", len(conceptsDictionary.ConceptsMap))
+	return conceptsDictionary, conceptParseResult, nil
 }
 
-func parseSpec(specFile string, conceptDictionary *gauge.ConceptDictionary, specChannel chan *gauge.Specification, parseResultChan chan *ParseResult) {
+func parseSpec(specFile string, conceptDictionary *gauge.ConceptDictionary) (*gauge.Specification, *ParseResult) {
 	specFileContent, err := common.ReadFileContents(specFile)
 	if err != nil {
-		specChannel <- nil
-		parseResultChan <- &ParseResult{ParseErrors: []ParseError{ParseError{FileName: specFile, Message: err.Error()}}, Ok: false}
-		return
+		return nil, &ParseResult{ParseErrors: []ParseError{ParseError{FileName: specFile, Message: err.Error()}}, Ok: false}
 	}
-	spec, parseResult := new(SpecParser).Parse(specFileContent, conceptDictionary, specFile)
-	specChannel <- spec
-	parseResultChan <- parseResult
+	spec, parseResult, err := new(SpecParser).Parse(specFileContent, conceptDictionary, specFile)
+	if err != nil {
+		logger.Fatalf(true, err.Error())
+	}
+	return spec, parseResult
 }
 
-func addSpecsToMap(specs []*gauge.Specification, specsMap map[string]*gauge.Specification) {
-	for _, spec := range specs {
-		if _, ok := specsMap[spec.FileName]; ok {
-			specsMap[spec.FileName].Scenarios = append(specsMap[spec.FileName].Scenarios, spec.Scenarios...)
-			for _, sce := range spec.Scenarios {
-				specsMap[spec.FileName].Items = append(specsMap[spec.FileName].Items, sce)
-			}
-			continue
-		}
-		specsMap[spec.FileName] = spec
-	}
+type specFile struct {
+	filePath string
+	indices  []int
 }
 
 // parseSpecsInDirs parses all the specs in list of dirs given.
-// It also merges the scenarios belonging to same spec which are passed as different arguments in `specDirs`
+// It also de-duplicates all specs passed through `specDirs` before parsing specs.
 func parseSpecsInDirs(conceptDictionary *gauge.ConceptDictionary, specDirs []string, buildErrors *gauge.BuildErrors) ([]*gauge.Specification, bool) {
-	specsMap := make(map[string]*gauge.Specification)
 	passed := true
-	var givenSpecs []*gauge.Specification
-	for _, specSource := range specDirs {
-		var specs []*gauge.Specification
-		var specParseResults []*ParseResult
-		if isIndexedSpec(specSource) {
-			specs, specParseResults = getSpecWithScenarioIndex(specSource, conceptDictionary, buildErrors)
+	givenSpecs, specFiles := getAllSpecFiles(specDirs)
+	var specs []*gauge.Specification
+	var specParseResults []*ParseResult
+	allSpecs := make([]*gauge.Specification, len(specFiles))
+	logger.Debug(true, "Started specifications parsing.")
+	specs, specParseResults = ParseSpecFiles(givenSpecs, conceptDictionary, buildErrors)
+	passed = !HandleParseResult(specParseResults...) && passed
+	logger.Debugf(true, "%d specifications parsing completed.", len(specFiles))
+	for _, spec := range specs {
+		i, _ := getIndexFor(specFiles, spec.FileName)
+		specFile := specFiles[i]
+		if len(specFile.indices) > 0 {
+			s, _ := spec.Filter(filter.NewScenarioFilterBasedOnSpan(specFile.indices))
+			allSpecs[i] = s
 		} else {
-			specs, specParseResults = ParseSpecFiles(util.GetSpecFiles(specSource), conceptDictionary, buildErrors)
-		}
-		passed = !HandleParseResult(specParseResults...) && passed
-		givenSpecs = append(givenSpecs, specs...)
-		addSpecsToMap(specs, specsMap)
-	}
-	var allSpecs []*gauge.Specification
-	for _, spec := range givenSpecs {
-		if _, ok := specsMap[spec.FileName]; ok {
-			allSpecs = append(allSpecs, specsMap[spec.FileName])
-			delete(specsMap, spec.FileName)
+			allSpecs[i] = spec
 		}
 	}
 	return allSpecs, !passed
 }
 
-func getSpecWithScenarioIndex(specSource string, conceptDictionary *gauge.ConceptDictionary, buildErrors *gauge.BuildErrors) ([]*gauge.Specification, []*ParseResult) {
-	specName, indexToFilter := getIndexedSpecName(specSource)
-	parsedSpecs, parseResult := ParseSpecFiles(util.GetSpecFiles(specName), conceptDictionary, buildErrors)
-	return filter.FilterSpecsItems(parsedSpecs, filter.NewScenarioFilterBasedOnSpan(indexToFilter)), parseResult
+func getAllSpecFiles(specDirs []string) (givenSpecs []string, specFiles []*specFile) {
+	for _, specSource := range specDirs {
+		if isIndexedSpec(specSource) {
+			var specName string
+			specName, index := getIndexedSpecName(specSource)
+			files := util.GetSpecFiles([]string{specName})
+			if len(files) < 1 {
+				continue
+			}
+			specificationFile, created := addSpecFile(&specFiles, files[0])
+			if created || len(specificationFile.indices) > 0 {
+				specificationFile.indices = append(specificationFile.indices, index)
+			}
+			givenSpecs = append(givenSpecs, files[0])
+		} else {
+			files := util.GetSpecFiles([]string{specSource})
+			for _, file := range files {
+				specificationFile, _ := addSpecFile(&specFiles, file)
+				specificationFile.indices = specificationFile.indices[0:0]
+			}
+			givenSpecs = append(givenSpecs, files...)
+		}
+	}
+	return
+}
+
+func addSpecFile(specFiles *[]*specFile, file string) (*specFile, bool) {
+	i, exists := getIndexFor(*specFiles, file)
+	if !exists {
+		specificationFile := &specFile{filePath: file}
+		*specFiles = append(*specFiles, specificationFile)
+		return specificationFile, true
+	}
+	return (*specFiles)[i], false
+}
+
+func getIndexFor(files []*specFile, file string) (int, bool) {
+	for index, f := range files {
+		if f.filePath == file {
+			return index, true
+		}
+	}
+	return -1, false
 }
 
 func isIndexedSpec(specSource string) bool {
-	return getIndex(specSource) != 0
+	re := regexp.MustCompile(`(?i).(spec|md):[0-9]+$`)
+	index := re.FindStringIndex(specSource)
+	if index != nil {
+		return index[0] != 0
+	}
+	return false
 }
 
 func getIndexedSpecName(indexedSpec string) (string, int) {
@@ -154,6 +246,7 @@ func getIndex(specSource string) int {
 	return 0
 }
 
+// ExtractStepValueAndParams parses a stepText string into a StepValue struct
 func ExtractStepValueAndParams(stepText string, hasInlineTable bool) (*gauge.StepValue, error) {
 	stepValueWithPlaceHolders, args, err := processStepText(stepText)
 	if err != nil {
@@ -167,22 +260,16 @@ func ExtractStepValueAndParams(stepText string, hasInlineTable bool) (*gauge.Ste
 	}
 	parameterizedStepValue := getParameterizeStepValue(extractedStepValue, args)
 
-	return &gauge.StepValue{args, extractedStepValue, parameterizedStepValue}, nil
+	return &gauge.StepValue{Args: args, StepValue: extractedStepValue, ParameterizedStepValue: parameterizedStepValue}, nil
 
 }
 
+// CreateStepValue converts a Step to StepValue
 func CreateStepValue(step *gauge.Step) gauge.StepValue {
 	stepValue := gauge.StepValue{StepValue: step.Value}
 	args := make([]string, 0)
 	for _, arg := range step.Args {
-		switch arg.ArgType {
-		case gauge.Static, gauge.Dynamic:
-			args = append(args, arg.Value)
-		case gauge.TableArg:
-			args = append(args, "table")
-		case gauge.SpecialString, gauge.SpecialTable:
-			args = append(args, arg.Name)
-		}
+		args = append(args, arg.ArgValue())
 	}
 	stepValue.Args = args
 	stepValue.ParameterizedStepValue = getParameterizeStepValue(stepValue.StepValue, args)
@@ -196,18 +283,19 @@ func getParameterizeStepValue(stepValue string, params []string) string {
 	return stepValue
 }
 
+// HandleParseResult collates list of parse result and determines if gauge has to break flow.
 func HandleParseResult(results ...*ParseResult) bool {
 	var failed = false
 	for _, result := range results {
 		if !result.Ok {
 			for _, err := range result.Errors() {
-				logger.Errorf(err)
+				logger.Errorf(true, err)
 			}
 			failed = true
 		}
 		if result.Warnings != nil {
 			for _, warning := range result.Warnings {
-				logger.Warning("[ParseWarning] %s", warning)
+				logger.Warningf(true, "[ParseWarning] %s", warning)
 			}
 		}
 	}

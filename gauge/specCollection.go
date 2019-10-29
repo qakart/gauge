@@ -17,7 +17,9 @@
 
 package gauge
 
-import "sync"
+import (
+	"sync"
+)
 
 type SpecCollection struct {
 	mutex sync.Mutex
@@ -26,7 +28,7 @@ type SpecCollection struct {
 }
 
 func NewSpecCollection(s []*Specification, groupDataTableSpecs bool) *SpecCollection {
-	if groupDataTableSpecs == false {
+	if !groupDataTableSpecs {
 		var specs [][]*Specification
 		for _, spec := range s {
 			specs = append(specs, []*Specification{spec})
@@ -56,9 +58,7 @@ func (s *SpecCollection) Add(spec *Specification) {
 
 func (s *SpecCollection) Specs() (specs []*Specification) {
 	for _, subSpecs := range s.specs {
-		for _, spec := range subSpecs {
-			specs = append(specs, spec)
-		}
+		specs = append(specs, subSpecs...)
 	}
 	return specs
 }

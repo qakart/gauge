@@ -1,9 +1,34 @@
 #!/bin/bash
+# Copyright 2015 ThoughtWorks, Inc.
+
+# This file is part of Gauge.
+
+# Gauge is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# Gauge is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with Gauge.  If not, see <http://www.gnu.org/licenses/>.
+
 # Original source: https://github.com/gauge/gauge/blob/master/script/mkdeb
 
 # Usage:
 # ./build/mkdeb.sh [--rebuild]
 
+if [[ -z $GOPATH ]]; then
+    export GOPATH=`pwd`
+fi
+if [[ -z $GOBIN ]]; then
+    export GOBIN="$GOPATH/bin"
+fi
+
+cd $GOPATH/src/github.com/getgauge/gauge
 set -e
 
 function err () {
@@ -21,7 +46,6 @@ FILE_EXT="zip"
 FILE_MODE=755
 CONTROL_FILE="$BUILD_DIR/packaging/deb/control"
 POSTINST_FILE="$BUILD_DIR/packaging/deb/postinst"
-GAUGE_SETUP_FILE="$BUILD_DIR/packaging/gauge_setup"
 
 if [ "$OS" != "linux" ]; then
     err "This script can only be run on Linux systems"
@@ -93,24 +117,23 @@ function clean_stage() {
 
 function prep_deb() {
     echo "Preparing .deb data..."
-    mkdir -m $FILE_MODE -p "$TARGET/usr/local/gauge"
+    mkdir -m $FILE_MODE -p "$TARGET/usr/local/bin/"
 
-    cp -r "$PKG_SRC/bin" "$TARGET/usr/local"
-    cp -r "$PKG_SRC/config" "$TARGET/usr/local/gauge"
+    cp -r "$PKG_SRC/gauge" "$TARGET/usr/local/bin/"
 
     mkdir -m $FILE_MODE -p "$TARGET/DEBIAN"
     cp "$CONTROL_FILE" "$TARGET/DEBIAN/control"
+    chmod +x "$POSTINST_FILE"
     cp "$POSTINST_FILE" "$TARGET/DEBIAN/postinst"
-    cp "$GAUGE_SETUP_FILE" "$TARGET/usr/local/bin/gauge_setup"
 
-    chmod +x $TARGET/usr/local/bin/*
+    chmod +x $TARGET/usr/local/bin/gauge
 
     sync
 
     CONTROL_DATA=$(cat "$TARGET/DEBIAN/control")
-    INSTALLED_SIZE=$(du -s $PKG_SRC/bin/ | sed "s/^\([0-9]*\).*$/\1/")
+    INSTALLED_SIZE=$(du -s $PKG_SRC/ | sed "s/^\([0-9]*\).*$/\1/")
     while [ $INSTALLED_SIZE -lt 1 ]; do
-            INSTALLED_SIZE=$(du -s $PKG_SRC/bin/ | sed "s/^\([0-9]*\).*$/\1/")
+            INSTALLED_SIZE=$(du -s $PKG_SRC/ | sed "s/^\([0-9]*\).*$/\1/")
     done
     echo "$CONTROL_DATA" | sed "s/<version>/$VERSION/" | sed "s/<arch>/$ARCH/" | sed "s/<size>/$INSTALLED_SIZE/" > "$TARGET/DEBIAN/control"
 

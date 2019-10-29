@@ -19,17 +19,18 @@ package install
 
 import (
 	"fmt"
-	"io"
 	"net/http"
+	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 
-	"github.com/dmotylev/goproperties"
-	"github.com/getgauge/gauge/config"
 	"github.com/getgauge/gauge/logger"
-	"github.com/getgauge/gauge/plugin"
+	"github.com/getgauge/gauge/plugin/pluginInfo"
 	"github.com/getgauge/gauge/version"
 )
+
+const gauge_releases_url = "https://github.com/getgauge/gauge/releases"
 
 type UpdateFacade struct {
 	wg    *sync.WaitGroup
@@ -53,10 +54,10 @@ func PrintUpdateInfoWithDetails() {
 	updates := checkUpdates()
 	if len(updates) > 0 {
 		for _, update := range updates {
-			logger.Info(fmt.Sprintf("%-10s\t\t%-10s\t%s", update.Name, update.CompatibleVersion, update.Message))
+			logger.Infof(true, fmt.Sprintf("%-10s\t\t%-10s\t%s", update.Name, update.CompatibleVersion, update.Message))
 		}
 	} else {
-		logger.Info("No Updates available.")
+		logger.Infof(true, "No Updates available.")
 	}
 }
 
@@ -64,12 +65,19 @@ func checkUpdates() []UpdateInfo {
 	return append(checkGaugeUpdate(), checkPluginUpdates()...)
 }
 
+func recoverPanic() {
+	if r := recover(); r != nil {
+		logger.Fatalf(true, "%v\n%s", r, string(debug.Stack()))
+	}
+}
+
 func printUpdateInfo(print chan bool, wg *sync.WaitGroup) {
 	message := make(chan string)
 	go func() {
+		defer recoverPanic()
 		updates := checkUpdates()
 		if len(updates) > 0 {
-			message <- "Updates are available. Run gauge --check-updates for more info."
+			message <- "Updates are available. Run `gauge update -c` for more info."
 		}
 	}()
 	waitToPrint(message, print, "", wg)
@@ -79,7 +87,7 @@ func waitToPrint(messageChan chan string, printChan chan bool, message string, w
 	select {
 	case <-printChan:
 		if message != "" {
-			logger.Info(message)
+			logger.Infof(true, message)
 		}
 		wg.Done()
 	case message = <-messageChan:
@@ -89,11 +97,7 @@ func waitToPrint(messageChan chan string, printChan chan bool, message string, w
 
 func checkGaugeUpdate() []UpdateInfo {
 	var updateInfos []UpdateInfo
-	url := config.GaugeUpdateUrl()
-	if qp := plugin.QueryParams(); qp != "" {
-		url += qp
-	}
-	v, err := getLatestGaugeVersion(url)
+	v, err := getLatestGaugeVersion(gauge_releases_url + "/latest")
 	if err != nil {
 		return updateInfos
 	}
@@ -103,7 +107,7 @@ func checkGaugeUpdate() []UpdateInfo {
 	}
 	isLatestVersion := version.CurrentGaugeVersion.IsLesserThan(latestVersion)
 	if isLatestVersion {
-		updateInfos = append(updateInfos, UpdateInfo{"Gauge", latestVersion.String(), "Download the installer from http://getgauge.io/get-started/"})
+		updateInfos = append(updateInfos, UpdateInfo{"Gauge", latestVersion.String(), "Download the installer from https://gauge.org/get-started/"})
 	}
 	return updateInfos
 }
@@ -116,11 +120,11 @@ type UpdateInfo struct {
 
 func checkPluginUpdates() []UpdateInfo {
 	var pluginsToUpdate []UpdateInfo
-	plugins, err := plugin.GetAllInstalledPluginsWithVersion()
+	plugins, err := pluginInfo.GetAllInstalledPluginsWithVersion()
 	if err != nil {
 		return pluginsToUpdate
 	}
-	logger.Debug("Checking updates...")
+	logger.Debugf(true, "Checking updates...")
 	for _, plugin := range plugins {
 		desc, result := getInstallDescription(plugin.Name, true)
 		if result.Error != nil {
@@ -146,7 +150,7 @@ func createPluginUpdateDetail(currentVersion string, latestVersionDetails instal
 		if err != nil {
 			return updateInfo
 		}
-		updateInfo = append(updateInfo, UpdateInfo{latestVersionDetails.Name, versionDesc.Version, fmt.Sprintf("Run 'gauge --update %s'", latestVersionDetails.Name)})
+		updateInfo = append(updateInfo, UpdateInfo{latestVersionDetails.Name, versionDesc.Version, fmt.Sprintf("Run 'gauge update %s'", latestVersionDetails.Name)})
 	}
 	return updateInfo
 }
@@ -158,19 +162,22 @@ var getLatestGaugeVersion = func(url string) (string, error) {
 	}
 	defer res.Body.Close()
 
-	v, err := getGaugeVersionProperty(res.Body)
+	v, err := getGaugeVersionFromURL(res.Request.URL.String())
 	if err != nil {
 		return "", err
 	}
 	return v, nil
 }
 
-func getGaugeVersionProperty(r io.Reader) (string, error) {
-	properties := make(properties.Properties)
-
-	err := properties.Load(r)
+func getGaugeVersionFromURL(url string) (string, error) {
+	versionString := strings.Replace(url, gauge_releases_url, "", -1)
+	reg, err := regexp.Compile(`tag/v(\d.*)`)
 	if err != nil {
-		return "", fmt.Errorf("Failed to parse: %s", err.Error())
+		return "", fmt.Errorf("unable to compile regex 'tag/v(\\d.*)': %s", err.Error())
 	}
-	return strings.TrimSpace(properties["version"]), nil
+	matches := reg.FindStringSubmatch(versionString)
+	if len(matches) < 2 {
+		return "", fmt.Errorf("failed to parse: %s", url)
+	}
+	return matches[1], nil
 }
